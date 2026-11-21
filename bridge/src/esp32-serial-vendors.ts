@@ -1,4 +1,6 @@
 import { execFile } from 'node:child_process';
+import { readFileSync, realpathSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
 
 const LOOKUP_TIMEOUT_MS = 3_000;
 const CACHE_MS = 5 * 60_000;
@@ -35,6 +37,25 @@ export function parseIoregSerialVendors(output: string): Map<string, number> {
   return vendors;
 }
 
+/**
+ * Linux: a tty's USB vendor from sysfs. /sys/class/tty/<name>/device is the
+ * USB interface; its parent directory is the USB device holding idVendor.
+ * Unreadable (not USB, no sysfs) → absent, i.e. unknown.
+ * @internal Exported for testing only
+ */
+export function linuxSerialVendors(ports: readonly string[], sysRoot = '/sys/class/tty'): Map<string, number> {
+  const vendors = new Map<string, number>();
+  for (const port of ports) {
+    try {
+      const iface = realpathSync(join(sysRoot, basename(port), 'device'));
+      const hex = readFileSync(join(dirname(iface), 'idVendor'), 'utf8').trim();
+      const id = Number.parseInt(hex, 16);
+      if (/^[0-9a-f]{4}$/i.test(hex) && Number.isFinite(id)) vendors.set(port, id);
+    } catch { /* unknown */ }
+  }
+  return vendors;
+}
+
 /** macOS USB vendor reads have two lifetimes: callers stop waiting at the
  * deadline, but the subprocess slot stays occupied until the child closes.
  * In particular, child.killed only means a signal was sent, not that it exited.
@@ -50,6 +71,7 @@ export class SerialVendorDiscovery {
   constructor(private readonly report: (message: string) => void = () => {}) {}
 
   lookup(ports: readonly string[], platform = process.platform): Promise<Map<string, number>> {
+    if (platform === 'linux') return Promise.resolve(linuxSerialVendors(ports));
     if (platform !== 'darwin') return Promise.resolve(new Map());
     const key = JSON.stringify([...new Set(ports)].sort());
     if (key !== this.topology) {
