@@ -26,3 +26,10 @@ describe('tmux permission requestId', () => {
     expect(TMUX_PERMISSION_PREFIX.length + 36).toBeLessThanOrEqual(DEVICE_CONTROLLER_RULES.compact.requestBytes);
   });
 });
+
+describe('tmux permission screen', () => {
+  it('ignores the blank rows the TUI leaves below the dialog', async () => {
+    const { showsPermissionDialog } = await import('../tmux-permission.js');
+    expect(showsPermissionDialog(' Do you want to proceed?\n ❯ 1. Yes\n   4. No\n' + '\n'.repeat(60))).toBe(true);
+  });
+});

@@ -38,7 +38,8 @@ export function tmuxPermissionRequestId(uuid: string, tty: string | undefined): 
 
 /** "❯ 1. Yes" as Claude Code renders a fresh permission dialog. */
 export function showsPermissionDialog(screen: string): boolean {
-  const tail = screen.split('\n').slice(-30).join('\n');
+  // The TUI leaves blank rows below the dialog: judge the last 30 non-blank.
+  const tail = screen.split('\n').filter((l) => l.trim()).slice(-30).join('\n');
   return /❯\s*1\.\s*Yes\b/.test(tail);
 }
 
@@ -48,7 +49,7 @@ export async function answerTmuxPermission(tty: string | undefined, allow: boole
   if (!pane) return { ok: false, reason: 'session is not in a tmux pane' };
   let screen: string;
   try {
-    ({ stdout: screen } = await execFileAsync('tmux', ['capture-pane', '-p', '-t', pane], { encoding: 'utf8', timeout: 2_000 }));
+    ({ stdout: screen } = await execFileAsync('tmux', ['capture-pane', '-p', '-J', '-t', pane], { encoding: 'utf8', timeout: 2_000 }));
   } catch {
     return { ok: false, reason: 'tmux capture-pane failed' };
   }
