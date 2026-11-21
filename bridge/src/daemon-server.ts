@@ -102,6 +102,7 @@ import { resolveSessionIdPrefix } from './session-id-resolve.js';
 import {
   SessionOrderStore, resolveSessionOrderTarget, parseSessionOrderWeight,
 } from './session-order-store.js';
+import { answerTmuxPermission, refreshTmuxPanes, tmuxPermissionRequestId, TMUX_PERMISSION_PREFIX } from './tmux-permission.js';
 import { injectObservedSelection, injectObservedText, injectTextViaTmux, type InjectResult } from './observed-inject.js';
 import { ClaudeInbox, type InboxResult } from './claude-inbox.js';
 import {
@@ -4061,7 +4062,8 @@ export async function startDaemon(opts: DaemonOptions): Promise<void> {
               if (setPermissionNotificationOverlay(claudeSid, message, isPendingRequest)) {
                 // Broadcast immediately rather than waiting for the 2s debounce
                 // or the 5s observer tick, so the prompt surfaces within one frame.
-                core.broadcastSessionsList().catch(() => {});
+                // Refresh the tmux pane cache first: it decides ALLOW/DENY.
+                refreshTmuxPanes().finally(() => core.broadcastSessionsList().catch(() => {}));
               }
             }
           } else if (mapped === 'tool_start' && toolName === 'AskUserQuestion') {
@@ -6136,8 +6138,13 @@ export async function startDaemon(opts: DaemonOptions): Promise<void> {
         const uuid = s.id.slice('observed:claude:'.length);
         const liveAnswerable = Boolean(s.tty || s.appName) || pendingAskGateBySession.has(uuid);
         const snap = steeringSnapshot(uuid);
+        // A display-only permission prompt in a tmux pane is answerable by
+        // keys (tmux-permission.ts): give devices a requestId for ALLOW/DENY.
+        const tmuxRequestId = s.state === 'awaiting_permission' && !s.requestId
+          ? tmuxPermissionRequestId(uuid, s.tty) : undefined;
         return {
           ...s,
+          ...(tmuxRequestId ? { requestId: tmuxRequestId } : {}),
           liveAnswerable,
           ...(snap.stopRequested ? { stopRequested: true } : {}),
           ...(snap.queuedDirectives > 0 ? { queuedDirectives: snap.queuedDirectives } : {}),
@@ -7145,6 +7152,18 @@ export async function startDaemon(opts: DaemonOptions): Promise<void> {
           debug('daemon', `opencode permission ${requestId} not queued: stale request or full command queue`);
           core.broadcastSessionsList().catch(() => {});
         }
+        return;
+      }
+      // Plain `claude` in tmux: answer the dialog with keys (tmux-permission.ts).
+      if (requestId.startsWith(TMUX_PERMISSION_PREFIX)) {
+        const uuid = requestId.slice(TMUX_PERMISSION_PREFIX.length);
+        const obs = passiveSessionObserver.collect([])
+          .find((s) => s.id === `observed:claude:${uuid}`) as { tty?: string } | undefined;
+        answerTmuxPermission(obs?.tty, decision === 'allow').then((r) => {
+          log(`permission ${decision} via tmux for ${uuid.slice(0, 8)}: ${r.reason}`);
+          if (r.ok) clearAwaitingOverlay(uuid);
+          core.broadcastSessionsList().catch(() => {});
+        });
         return;
       }
       // resolvePending → onResolved clears the overlay + rebroadcasts (sessions_list
