@@ -164,7 +164,7 @@ export class ClaudeInbox {
     let settle!: (value: InboxResult) => void;
     const confirmed = new Promise<InboxResult>(done => { settle=done; });
     const pending: Pending = {target,settle,update}; this.pending.set(id,pending);
-    const frame = JSON.stringify({type:'user',session_id:sessionId,uuid:id,msg_id:id,from:`uds:${reply}`,message:{role:'user',content:`AgentDeck dictated peer message:\n${text.trim()}`}}) + '\n';
+    const frame = JSON.stringify({type:'user',session_id:sessionId,uuid:id,msg_id:id,from:`uds:${reply}`,message:{role:'user',content:text.trim()}}) + '\n';
     let written = false;
     const sent = await new Promise<boolean>(resolve => {
       const socket = createConnection({path:target.path}); let done=false;
