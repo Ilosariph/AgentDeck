@@ -102,7 +102,7 @@ import { resolveSessionIdPrefix } from './session-id-resolve.js';
 import {
   SessionOrderStore, resolveSessionOrderTarget, parseSessionOrderWeight,
 } from './session-order-store.js';
-import { injectObservedSelection, injectObservedText, type InjectResult } from './observed-inject.js';
+import { injectObservedSelection, injectObservedText, injectTextViaTmux, type InjectResult } from './observed-inject.js';
 import { ClaudeInbox, type InboxResult } from './claude-inbox.js';
 import {
   setSerialCommandSink, setSerialVoiceSink, setSerialQuiesceCheck, sendSerialJson,
@@ -1913,6 +1913,11 @@ export async function startDaemon(opts: DaemonOptions): Promise<void> {
   let observedDeliveryStopped = false;
   const voiceDeliveryGenerations = new Map<string, string>();
   async function deliverObservedPrompt(sessionId: string, obs: {tty?: string; appName?: string; pid?: number} | undefined, text: string, update?: (value: InboxResult) => void): Promise<InjectResult | InboxResult> {
+    if (observedDeliveryStopped) return {ok:false,reason:'daemon stopped'};
+    // A session in a tmux pane gets the text typed, as if the user typed it
+    // (full user authority, no peer-message framing). Others use the inbox.
+    const typed = await injectTextViaTmux(obs?.tty, text);
+    if (typed) return typed;
     if (observedDeliveryStopped) return {ok:false,reason:'daemon stopped'};
     const voice = loadDaemonSettings().voice as {claudeDelivery?: unknown} | undefined;
     if (sessionId.startsWith('observed:claude:') && voice?.claudeDelivery !== 'terminal') {

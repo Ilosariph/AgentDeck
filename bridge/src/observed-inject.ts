@@ -667,6 +667,34 @@ export async function injectObservedSelection(
  * field is far riskier (no way to know what has focus), and a spoken prompt
  * that lands in the wrong place is worse than one that is refused.
  */
+/** Type `text` into the tmux pane on `tty` and press Enter, exactly as if the
+ * user typed it. undefined: no tmux server or no pane on that tty (nothing was
+ * sent, so another route may try). */
+export async function injectTextViaTmux(tty: string | undefined, text: string): Promise<InjectResult | undefined> {
+  const line = text.trim().replace(/[\r\n]+/g, ' ');
+  if (!tty || !line) return undefined;
+  let paneId: string | undefined;
+  try {
+    const { stdout } = await execFileAsync(
+      'tmux', ['list-panes', '-a', '-F', '#{pane_tty}\t#{pane_id}'],
+      { encoding: 'utf8', timeout: 2_000 },
+    );
+    paneId = parseTmuxPanes(stdout).get(tty);
+  } catch { return undefined; /* no tmux server */ }
+  if (!paneId) return undefined;
+  // -l sends the payload literally, then a separate Enter submits it.
+  try {
+    await execFileAsync('tmux', ['send-keys', '-t', paneId, '-l', line], { timeout: 2_000 });
+  } catch { return undefined; }
+  // Same beat as above: process spawn alone happens to provide ~50 ms, which
+  // is not a guarantee worth relying on for the keystroke that commits.
+  await new Promise((r) => setTimeout(r, 250));
+  try {
+    await execFileAsync('tmux', ['send-keys', '-t', paneId, 'Enter'], { timeout: 2_000 });
+  } catch { return { ok: false, reason: `tmux typed the text but Enter failed for ${tty}` }; }
+  return { ok: true, via: 'tmux' };
+}
+
 export async function injectObservedText(
   target: InjectTarget,
   text: string,
@@ -678,22 +706,8 @@ export async function injectObservedText(
   const { tty } = target;
   if (!tty) return { ok: false, reason: 'no tty for session (text injection is terminal-only)' };
 
-  // tmux: -l sends the payload literally, then a separate Enter submits it.
-  try {
-    const { stdout } = await execFileAsync(
-      'tmux', ['list-panes', '-a', '-F', '#{pane_tty}\t#{pane_id}'],
-      { encoding: 'utf8', timeout: 2_000 },
-    );
-    const paneId = parseTmuxPanes(stdout).get(tty);
-    if (paneId) {
-      await execFileAsync('tmux', ['send-keys', '-t', paneId, '-l', line], { timeout: 2_000 });
-      // Same beat as above: process spawn alone happens to provide ~50 ms, which
-      // is not a guarantee worth relying on for the keystroke that commits.
-      await new Promise((r) => setTimeout(r, 250));
-      await execFileAsync('tmux', ['send-keys', '-t', paneId, 'Enter'], { timeout: 2_000 });
-      return { ok: true, via: 'tmux' };
-    }
-  } catch { /* no tmux server — fall through */ }
+  const viaTmux = await injectTextViaTmux(tty, line);
+  if (viaTmux) return viaTmux;
 
   const cmux = target.pid ? await readCmuxSurface(target.pid) : undefined;
   if (cmux) return injectTextViaCmux(cmux, line);
