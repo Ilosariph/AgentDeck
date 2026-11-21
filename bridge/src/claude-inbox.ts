@@ -18,7 +18,11 @@ const result = (status: InboxStatus, written = true): InboxResult => ({
   reason: ({delivered:'Claude received the dictated peer message',held:'Claude is holding the peer message for approval',refused:'Claude refused the peer message',denied:'Claude approval was declined',expired:'Claude approval expired',dropped:'Claude dropped the peer message',submitted:'Peer message submitted; Claude receipt unconfirmed',unavailable:'Claude inbox unavailable'} as const)[status],
 });
 
-const temporaryRoots = [...new Set([tmpdir(), '/tmp', '/private/tmp'].flatMap(value => {
+// Linux Claude Code puts its messaging socket in $XDG_RUNTIME_DIR/cc-socks
+// (/run/user/<uid>, 0700 and owned by the user, like a private tmp).
+const runtimeDir = process.platform === 'linux' && process.env.XDG_RUNTIME_DIR && isAbsolute(process.env.XDG_RUNTIME_DIR)
+  ? [process.env.XDG_RUNTIME_DIR] : [];
+const temporaryRoots = [...new Set([tmpdir(), '/tmp', '/private/tmp', ...runtimeDir].flatMap(value => {
   const root = resolve(value);
   try { return [root, realpathSync(root)]; } catch { return [root]; }
 }))];
