@@ -355,7 +355,9 @@ static void networkTask(void* param) {
                 }
             }
         }
-#elif !defined(BOARD_IPS10)
+#elif !defined(BOARD_IPS10) && !defined(BOARD_WAVESHARE_349)
+        // (Waveshare 3.49 keeps its radio on USB like voice IPS10 builds: the
+        // push-to-talk utterance is POSTed over WiFi, which serial cannot carry.)
         // Serial-primary WiFi radio parking (TTGO, TRMNL 7.5", and every other board
         // except TC001/LED8X32 above and IPS10 which parks via its own block).
         // When the daemon is actively driving this board over USB serial, serial
