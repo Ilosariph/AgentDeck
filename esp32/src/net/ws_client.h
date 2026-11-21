@@ -101,7 +101,18 @@ bool queueVoiceHttpUpload(const uint8_t* pcm, size_t len, const char* board,
                           const char* sessionId, uint32_t sampleRate,
                           uint32_t durationMs);
 
-/** True from queueVoiceHttpUpload() until the POST completes or fails. */
+/**
+ * USB fallback for queueVoiceHttpUpload() when WiFi is down: the finished
+ * utterance goes over serial as voice_begin / audio_chunk (base64) / voice_end
+ * lines, paced by the network task after the button is released (HWCDC loses
+ * data when written fast, so this runs at about real time, not live). Same
+ * buffer contract. False when an upload is pending or serial is not up.
+ */
+bool queueVoiceSerialUpload(const uint8_t* pcm, size_t len, const char* board,
+                            const char* sessionId, uint32_t sampleRate,
+                            uint32_t durationMs);
+
+/** True from queueVoiceHttpUpload()/queueVoiceSerialUpload() until done. */
 bool voiceUploadBusy();
 
 /**

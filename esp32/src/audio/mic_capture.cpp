@@ -6,6 +6,7 @@
 
 #include "mic_capture.h"
 #include "../net/ws_client.h"
+#include "../net/serial_client.h"   // Net::serialConnected — USB voice fallback
 
 #include <Arduino.h>
 #if defined(BOARD_PIN_MIC_DATA) || defined(BOARD_MIC_ES7210)
@@ -250,7 +251,13 @@ void micStart(const char* sessionId) {
     // Per-utterance decision, not a build-time one: WiFi can be down, the
     // buffer can have failed to allocate, and the previous upload can still be
     // in flight. Any of those falls back to the live-streaming path.
-    s_httpActive = s_utterBuf != nullptr && Net::wifiConnected() && !Net::voiceUploadBusy();
+    s_httpActive = s_utterBuf != nullptr && !Net::voiceUploadBusy()
+        && (Net::wifiConnected()
+#if defined(BOARD_MIC_ES7210)
+            // No WiFi: buffer anyway and send it over USB after release.
+            || Net::serialConnected()
+#endif
+        );
     if (s_httpActive) {
         Serial.println("[Mic] capture start (HTTP buffered)");
     } else
@@ -261,7 +268,7 @@ void micStart(const char* sessionId) {
         s_capturing = false;
         Es7210::stop();
         Serial.println("[Mic] no WiFi or upload busy — capture refused");
-        MIC_NOTIFY(Net::wifiConnected() ? "Voice upload busy" : "Voice needs WiFi");
+        MIC_NOTIFY(Net::voiceUploadBusy() ? "Voice upload busy" : "Voice needs WiFi or USB");
         return;
 #endif
         char frame[160];
@@ -302,13 +309,22 @@ void micPump() {
                 if (!s_closingCancel) MIC_NOTIFY("Heard nothing");
                 return;
             }
-            if (!Net::queueVoiceHttpUpload(s_utterBuf, s_utterLen, MIC_BOARD_NAME,
-                                           s_session, SAMPLE_RATE, s_closingDurationMs)) {
-                Serial.println("[Mic] HTTP voice upload refused — utterance dropped");
+            bool viaSerial = false;
+            bool queued = Net::wifiConnected() && Net::queueVoiceHttpUpload(s_utterBuf, s_utterLen, MIC_BOARD_NAME,
+                                           s_session, SAMPLE_RATE, s_closingDurationMs);
+#if defined(BOARD_MIC_ES7210)
+            if (!queued && !Net::voiceUploadBusy()) {
+                queued = viaSerial = Net::queueVoiceSerialUpload(s_utterBuf, s_utterLen, MIC_BOARD_NAME,
+                                           s_session, SAMPLE_RATE, s_closingDurationMs);
+            }
+#endif
+            if (!queued) {
+                Serial.println("[Mic] voice upload refused — utterance dropped");
                 MIC_NOTIFY("Voice upload busy — try again");
             }
-            Serial.printf("[Mic] capture stop (%lums, %lu bytes -> HTTP)\n",
-                          (unsigned long)s_closingDurationMs, (unsigned long)s_utterLen);
+            Serial.printf("[Mic] capture stop (%lums, %lu bytes -> %s)\n",
+                          (unsigned long)s_closingDurationMs, (unsigned long)s_utterLen,
+                          viaSerial ? "USB" : "HTTP");
             return;
         }
 #endif

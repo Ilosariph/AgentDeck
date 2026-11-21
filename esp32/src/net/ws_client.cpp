@@ -598,6 +598,8 @@ bool audioBacklogged() {
 bool queueVoiceHttpUpload(const uint8_t*, size_t, const char*, const char*,
                           uint32_t, uint32_t) { return false; }
 bool voiceUploadBusy() { return false; }
+bool queueVoiceSerialUpload(const uint8_t*, size_t, const char*, const char*,
+                            uint32_t, uint32_t) { return false; }
 #endif
 bool queueVoiceReplyDownload(uint32_t, uint32_t) { return false; }
 #else
@@ -810,7 +812,99 @@ bool queueVoiceHttpUpload(const uint8_t* pcm, size_t len, const char* board,
     return taken;
 }
 
-bool voiceUploadBusy() { return voiceHttpPending; }
+// ── USB fallback: the buffered utterance over serial ──────────────────────
+static volatile bool voiceSerialPending = false;
+static const uint8_t* voiceSerialBuf = nullptr;
+static size_t voiceSerialLen = 0, voiceSerialOff = 0;
+static bool voiceSerialBegun = false;
+static char voiceSerialBoard[24] = {0};
+static char voiceSerialSession[64] = {0};
+static uint32_t voiceSerialRate = 16000, voiceSerialMs = 0, voiceSerialStartMs = 0;
+
+bool queueVoiceSerialUpload(const uint8_t* pcm, size_t len, const char* board,
+                            const char* sessionId, uint32_t sampleRate,
+                            uint32_t durationMs) {
+    if (!pcm || len == 0 || voiceHttpPending || voiceSerialPending || !Net::serialConnected()) return false;
+    voiceSerialBuf = pcm;
+    voiceSerialLen = len;
+    voiceSerialOff = 0;
+    voiceSerialBegun = false;
+    snprintf(voiceSerialBoard, sizeof(voiceSerialBoard), "%s", board ? board : "esp32");
+    snprintf(voiceSerialSession, sizeof(voiceSerialSession), "%s", sessionId ? sessionId : "");
+    voiceSerialRate = sampleRate;
+    voiceSerialMs = durationMs;
+    voiceSerialStartMs = millis();
+    voiceSerialPending = true;
+    return true;
+}
+
+// One line per call, so JSON replies and state updates interleave instead of
+// waiting out the whole utterance.
+static void pumpVoiceSerial() {
+    if (!voiceSerialPending) return;
+    if (!Net::serialConnected()) {
+        Serial.println("[Voice] serial dropped mid-upload — utterance lost");
+        voiceSerialPending = false;
+        VOICE_NOTIFY("Voice upload lost (USB)");
+        return;
+    }
+    static char line[2880];   // 2048 PCM bytes → 2732 base64 + envelope
+    if (!voiceSerialBegun) {
+        snprintf(line, sizeof(line),
+                 "{\"type\":\"voice_begin\",\"board\":\"%s\",\"format\":\"pcm16\","
+                 "\"sampleRate\":%lu,\"sessionId\":\"%s\"}",
+                 voiceSerialBoard, (unsigned long)voiceSerialRate, voiceSerialSession);
+        Net::serialWriteJsonLine(line);
+        voiceSerialBegun = true;
+        return;
+    }
+    if (voiceSerialOff < voiceSerialLen) {
+        const size_t n = min((size_t)2048, voiceSerialLen - voiceSerialOff);
+        const char* prefix = "{\"type\":\"audio_chunk\",\"d\":\"";
+        const size_t pfx = strlen(prefix);
+        memcpy(line, prefix, pfx);
+        size_t wrote = 0;
+        if (mbedtls_base64_encode((unsigned char*)line + pfx, sizeof(line) - pfx - 4, &wrote,
+                                  voiceSerialBuf + voiceSerialOff, n) == 0) {
+            line[pfx + wrote] = '"';
+            line[pfx + wrote + 1] = '}';
+            line[pfx + wrote + 2] = '\0';
+            Net::serialWriteJsonLine(line);
+        }
+        voiceSerialOff += n;
+        return;
+    }
+    snprintf(line, sizeof(line),
+             "{\"type\":\"voice_end\",\"durationMs\":%lu,\"cancel\":false,"
+             "\"capturedBytes\":%lu,\"queuedBytes\":%lu,\"droppedFrames\":0}",
+             (unsigned long)voiceSerialMs, (unsigned long)voiceSerialLen, (unsigned long)voiceSerialLen);
+    Net::serialWriteJsonLine(line);
+    Serial.printf("[Voice] serial upload %lu bytes in %lums\n",
+                  (unsigned long)voiceSerialLen, (unsigned long)(millis() - voiceSerialStartMs));
+    voiceSerialPending = false;
+}
+
+bool voiceUploadBusy() { return voiceHttpPending || voiceSerialPending; }
+
+// The pending HTTP utterance goes over USB instead (WiFi gone or the daemon
+// unreachable over it). The mic buffer stays latched, so nothing is lost.
+static bool voiceHttpToSerial(const char* why) {
+    if (!Net::serialConnected() || voiceSerialPending) return false;
+    xSemaphoreTake(voiceHttpMutex, portMAX_DELAY);
+    const uint8_t* buf = voiceHttpBuf;
+    size_t len = voiceHttpLen;
+    char board[24], session[64];
+    snprintf(board, sizeof(board), "%s", voiceHttpBoard);
+    snprintf(session, sizeof(session), "%s", voiceHttpSession);
+    uint32_t rate = voiceHttpRate, ms = voiceHttpMs;
+    voiceHttpBuf = nullptr;
+    voiceHttpLen = 0;
+    voiceHttpPending = false;
+    xSemaphoreGive(voiceHttpMutex);
+    if (!buf || !len) return false;
+    Serial.printf("[Voice] HTTP upload %s — sending over USB\n", why);
+    return queueVoiceSerialUpload(buf, len, board, session, rate, ms);
+}
 
 // Perform the pending POST on the network core. Blocking for the duration —
 // same trade as the photo path: the UI core keeps rendering, and a state
@@ -847,6 +941,7 @@ static void pumpVoiceHttp() {
     uint32_t now = millis();
     if (voiceHttpFirstTryMs == 0) voiceHttpFirstTryMs = now;
     if ((uint32_t)(now - voiceHttpFirstTryMs) > VOICE_HTTP_DEADLINE_MS) {
+        if (voiceHttpToSerial("deadline exceeded")) return;
         Serial.println("[Voice] upload deadline exceeded — giving up");
         VOICE_NOTIFY("Voice upload failed - network wedged");
 #if defined(BOARD_IPS10)
@@ -864,7 +959,10 @@ static void pumpVoiceHttp() {
         xSemaphoreGive(voiceHttpMutex);
         return;
     }
-    if (!Net::wifiConnected()) return;   // rejoin in progress — try next pass
+    if (!Net::wifiConnected()) {         // rejoin in progress — try next pass
+        voiceHttpToSerial("WiFi down");
+        return;
+    }
 
     // The hosted transport allocates its TX copies from internal heap and
     // aborts the whole board when that fails. Better to refuse one utterance
@@ -977,6 +1075,7 @@ static void pumpVoiceHttp() {
             // radio so the hosted STA rebuilds its data path.
             voiceHttpAttempts++;
             Serial.printf("[Voice] connect failed (attempt %u)\n", (unsigned)voiceHttpAttempts);
+            if (voiceHttpToSerial("connect failed")) return;
             if (voiceHttpAttempts >= 2 && !voiceHttpRejoinKicked) {
                 voiceHttpRejoinKicked = true;
                 Serial.println("[Voice] bouncing STA to un-wedge hosted link");
@@ -1098,6 +1197,7 @@ void pumpOutbound() {
 #endif
 #if defined(BOARD_VOICE_HTTP_UPLOAD)
     pumpVoiceHttp();
+    pumpVoiceSerial();
 #endif
 #if defined(VOICE_HTTP_REPLY)
     pumpVoiceReplyDownload();
