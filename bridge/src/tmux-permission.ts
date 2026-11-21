@@ -14,7 +14,8 @@ import { promisify } from 'node:util';
 import { parseTmuxPanes } from './observed-inject.js';
 
 const execFileAsync = promisify(execFile);
-export const TMUX_PERMISSION_PREFIX = 'tmuxperm:';
+// Short: device requestIds are capped at 39 bytes (prefix + 36-char uuid).
+export const TMUX_PERMISSION_PREFIX = 'tp:';
 
 let panes = new Map<string, string>();
 

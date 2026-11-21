@@ -18,3 +18,11 @@ describe('tmux permission answering', () => {
     expect(tmuxPermissionRequestId('abc', undefined)).toBeUndefined();
   });
 });
+
+describe('tmux permission requestId', () => {
+  it('fits the compact device requestId cap', async () => {
+    const { TMUX_PERMISSION_PREFIX } = await import('../tmux-permission.js');
+    const { DEVICE_CONTROLLER_RULES } = await import('@agentdeck/shared');
+    expect(TMUX_PERMISSION_PREFIX.length + 36).toBeLessThanOrEqual(DEVICE_CONTROLLER_RULES.compact.requestBytes);
+  });
+});
