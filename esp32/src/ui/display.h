@@ -14,7 +14,7 @@ extern lv_font_t font_kr_12;
 /** Larger Korean-safe faces (Latin at size, Korean via 12 px Noto fallback) for the IPS10 D1 detail overlay. */
 extern lv_font_t font_kr_16;
 extern lv_font_t font_kr_20;
-#elif defined(BOARD_T_DISPLAY_PRO) || defined(BOARD_T_EMBED)
+#elif defined(BOARD_FOCUS_STRIP) || defined(BOARD_T_EMBED)
 /** 16px Korean-safe face for the compact companion UIs (~1.5MB flash). */
 extern lv_font_t font_kr_16;
 #endif

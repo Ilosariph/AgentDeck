@@ -265,4 +265,18 @@ void powerOff() {
 
 }  // namespace Input
 
-#endif  // BOARD_T_EMBED / BOARD_T_DISPLAY_PRO
+#elif defined(BOARD_WAVESHARE_349)
+
+// No fuel gauge on the Waveshare 3.49: the strip hides its battery cluster.
+#include "power_monitor.h"
+#include "../drivers/waveshare_349.h"
+
+namespace Input {
+void powerInit() {}
+void i2cScanLog(const char*) {}
+void powerPoll(uint32_t) {}
+PowerStatus powerStatus() { return PowerStatus{}; }
+void powerOff() { Ws349::exio(Ws349::EXIO_BAT_HOLD, false); }
+}  // namespace Input
+
+#endif  // BOARD_T_EMBED / BOARD_T_DISPLAY_PRO / BOARD_WAVESHARE_349

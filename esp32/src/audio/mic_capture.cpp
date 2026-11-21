@@ -8,8 +8,21 @@
 #include "../net/ws_client.h"
 
 #include <Arduino.h>
-#if defined(BOARD_PIN_MIC_DATA)
+#if defined(BOARD_PIN_MIC_DATA) || defined(BOARD_MIC_ES7210)
+// The board's own I2S peripheral: a PDM mic, or an ES7210 ADC in slave mode.
+#define MIC_DIRECT_I2S 1
 #include <ESP_I2S.h>
+#if defined(BOARD_MIC_ES7210)
+#include "../drivers/es7210.h"
+#include "../drivers/waveshare_349.h"   // Ws349::earlyPower — Wire up
+#endif
+#if defined(BOARD_VOICE_HTTP_UPLOAD)
+#include <esp_heap_caps.h>
+#include "../net/wifi_manager.h"
+#if defined(BOARD_FOCUS_STRIP)
+#include "../ui/ticker/ticker_ui.h"
+#endif
+#endif
 #else
 // Codec boards capture through the same full-duplex I2S the speaker owns.
 #include "speaker_playback.h"
@@ -33,8 +46,16 @@
 #define MIC_BOARD_NAME "t_embed"
 #elif defined(BOARD_IPS10)
 #define MIC_BOARD_NAME "ips_10"
+#elif defined(BOARD_WAVESHARE_349)
+#define MIC_BOARD_NAME "waveshare_349"
 #else
 #error "BOARD_HAS_VOICE_CAPTURE set but no board name for voice_begin"
+#endif
+
+#if defined(BOARD_FOCUS_STRIP)
+#define MIC_NOTIFY(text) Ticker::notify(text)
+#else
+#define MIC_NOTIFY(text) HUD::notify(text)
 #endif
 
 static constexpr uint32_t SAMPLE_RATE = 16000;   // what Apple's recognizer wants
@@ -49,8 +70,12 @@ static constexpr uint32_t TAIL_DRAIN_MS = 300;
 // utterance late is better than never closing it.
 static constexpr uint32_t END_FLUSH_TIMEOUT_MS = 3000;
 
-#if defined(BOARD_PIN_MIC_DATA)
+#if defined(MIC_DIRECT_I2S)
 static I2SClass s_i2s;
+#endif
+#if defined(BOARD_MIC_ES7210)
+// The ES7210 delivers MIC1/MIC3 as a stereo pair; the two are averaged.
+static int16_t s_stereo[512 * 2];
 #endif
 static bool s_ready = false;
 static bool s_capturing = false;
@@ -85,7 +110,14 @@ static char s_session[40] = {0};
 // backlog ordering, runaway guard — is shared, and deliberately so: those rules
 // were each paid for by a bug.
 static size_t micReadFrame() {
-#if defined(BOARD_PIN_MIC_DATA)
+#if defined(BOARD_MIC_ES7210)
+    const size_t got = s_i2s.readBytes((char*)s_stereo, sizeof(s_stereo));
+    const size_t frames = got / 4;
+    for (size_t i = 0; i < frames; i++) {
+        s_buf[i] = (int16_t)(((int32_t)s_stereo[2 * i] + s_stereo[2 * i + 1]) / 2);
+    }
+    return frames * 2;
+#elif defined(BOARD_PIN_MIC_DATA)
     return s_i2s.readBytes((char*)s_buf, sizeof(s_buf));
 #else
     return Audio::captureRead((uint8_t*)s_buf, sizeof(s_buf));
@@ -117,7 +149,7 @@ static void micQueueFrame(size_t got) {
 }
 
 #if !defined(BOARD_PIN_MIC_DATA)
-// Codec boards pump from their own task. micReadFrame() blocks ~32 ms per
+// Codec and ES7210 boards pump from their own task. micReadFrame() blocks ~32 ms per
 // frame, and on ips10 the only other candidate thread drives LVGL with a 24 ms
 // input timer — pumping there would visibly stall touch for the whole hold.
 static TaskHandle_t s_pumpTask = nullptr;
@@ -134,7 +166,26 @@ static void micPumpTask(void*) {
 namespace Audio {
 
 bool micInit() {
-#if defined(BOARD_PIN_MIC_DATA)
+#if defined(BOARD_MIC_ES7210)
+    // I2S runs from boot (the ESP32 is the clock master the ES7210 slaves
+    // to); the ADC itself only converts between micStart and the end of the
+    // tail drain.
+    Ws349::earlyPower();
+    if (!Es7210::present()) {
+        Serial.println("[Mic] ES7210 not answering — push-to-talk disabled");
+        s_ready = false;
+    } else {
+        Es7210::open();
+        Es7210::stop();
+        s_i2s.setPins(BOARD_PIN_I2S_BCLK, BOARD_PIN_I2S_WS, BOARD_PIN_I2S_DOUT,
+                      BOARD_PIN_I2S_DIN, BOARD_PIN_I2S_MCLK);
+        s_ready = s_i2s.begin(I2S_MODE_STD, SAMPLE_RATE, I2S_DATA_BIT_WIDTH_16BIT,
+                              I2S_SLOT_MODE_STEREO);
+        if (s_ready) s_i2s.setTimeout(50);
+        Serial.println(s_ready ? "[Mic] ES7210 ready (16 kHz, MIC1+MIC3 averaged)"
+                               : "[Mic] I2S init failed — push-to-talk disabled");
+    }
+#elif defined(BOARD_PIN_MIC_DATA)
     // PDM RX shares no pins with the speaker's STD TX, but both grab an I2S
     // peripheral — the S3 has two, so capture and the chime can coexist.
     s_i2s.setPinsPdmRx(BOARD_PIN_MIC_CLK, BOARD_PIN_MIC_DATA);
@@ -183,6 +234,10 @@ void micStart(const char* sessionId) {
         return;
     }
 #endif
+#if defined(BOARD_MIC_ES7210)
+    if (s_closing) return;   // previous utterance still draining
+    Es7210::start();
+#endif
     s_closing = false;
     s_capturing = true;
     s_startedMs = millis();
@@ -201,6 +256,14 @@ void micStart(const char* sessionId) {
     } else
 #endif
     {
+#if defined(BOARD_MIC_ES7210)
+        // No live-stream fallback on this board: the strip only uploads.
+        s_capturing = false;
+        Es7210::stop();
+        Serial.println("[Mic] no WiFi or upload busy — capture refused");
+        MIC_NOTIFY(Net::wifiConnected() ? "Voice upload busy" : "Voice needs WiFi");
+        return;
+#endif
         char frame[160];
         snprintf(frame, sizeof(frame),
                  "{\"type\":\"voice_begin\",\"board\":\"" MIC_BOARD_NAME "\",\"format\":\"pcm16\","
@@ -225,6 +288,9 @@ void micPump() {
             micQueueFrame(got);
             return;
         }
+#if defined(BOARD_MIC_ES7210)
+        Es7210::stop();
+#endif
 #if defined(BOARD_VOICE_HTTP_UPLOAD)
         if (s_httpActive) {
             // Whole utterance is in PSRAM; hand it to the network core for one
@@ -233,13 +299,13 @@ void micPump() {
             if (s_closingCancel || s_utterLen == 0) {
                 Serial.printf("[Mic] capture discarded (%s)\n",
                               s_closingCancel ? "cancelled" : "empty");
-                if (!s_closingCancel) HUD::notify("Heard nothing");
+                if (!s_closingCancel) MIC_NOTIFY("Heard nothing");
                 return;
             }
             if (!Net::queueVoiceHttpUpload(s_utterBuf, s_utterLen, MIC_BOARD_NAME,
                                            s_session, SAMPLE_RATE, s_closingDurationMs)) {
                 Serial.println("[Mic] HTTP voice upload refused — utterance dropped");
-                HUD::notify("Voice upload busy — try again");
+                MIC_NOTIFY("Voice upload busy — try again");
             }
             Serial.printf("[Mic] capture stop (%lums, %lu bytes -> HTTP)\n",
                           (unsigned long)s_closingDurationMs, (unsigned long)s_utterLen);

@@ -3,7 +3,7 @@
 #include "../boards/board_config.h"
 #include "../util/memory.h"
 #include "fonts/font_noto_kr_12.h"
-#if defined(BOARD_IPS10) || defined(BOARD_T_DISPLAY_PRO) || defined(BOARD_T_EMBED)
+#if defined(BOARD_IPS10) || defined(BOARD_FOCUS_STRIP) || defined(BOARD_T_EMBED)
 #include "fonts/font_noto_kr_16.h"
 #endif
 #if defined(BOARD_T_DISPLAY_PRO)
@@ -18,7 +18,7 @@
 int16_t g_screenW = SCREEN_W;
 int16_t g_screenH = SCREEN_H;
 
-#if !defined(BOARD_AMOLED) && !defined(BOARD_IPS35) && !defined(BOARD_IPS10)
+#if !defined(BOARD_AMOLED) && !defined(BOARD_IPS35) && !defined(BOARD_IPS10) && !defined(BOARD_WAVESHARE_349)
 #include <LovyanGFX.hpp>
 #endif
 
@@ -374,6 +374,16 @@ public:
         setPanel(&_panel_instance);
     }
 };
+
+#elif defined(BOARD_WAVESHARE_349)
+// ===== Waveshare ESP32-S3-Touch-LCD-3.49: AXS15231B QSPI 172x640 =====
+// The panel only takes whole frames in QSPI mode (it ignores the write
+// window), so LVGL renders partial areas into a full landscape frame in PSRAM
+// and the last flush of a refresh pushes the frame, turned into the panel.
+// Touch is read by the Focus Strip gesture layer (input/touch_strip.cpp).
+#include "../drivers/waveshare_349.h"
+static Ws349::Panel s_panel;
+static uint16_t* s_frame = nullptr;   // SCREEN_W x SCREEN_H, native RGB565
 
 #elif defined(BOARD_IPS35)
 // ===== JC3248W535: AXS15231B QSPI =====
@@ -816,7 +826,7 @@ static void i2cPinCensus() {
 // Common LVGL integration
 // ============================================================
 
-#if !defined(BOARD_AMOLED) && !defined(BOARD_IPS35) && !defined(BOARD_IPS10)
+#if !defined(BOARD_AMOLED) && !defined(BOARD_IPS35) && !defined(BOARD_IPS10) && !defined(BOARD_WAVESHARE_349)
 static LGFX tft;
 
 #if defined(BOARD_TTGO) || defined(BOARD_ESP32_C6_147)
@@ -844,7 +854,7 @@ lv_font_t font_kr_12;
 // size, Korean glyphs via the 12 px Noto fallback — readable, never tofu).
 lv_font_t font_kr_16;
 lv_font_t font_kr_20;
-#elif defined(BOARD_T_DISPLAY_PRO) || defined(BOARD_T_EMBED)
+#elif defined(BOARD_FOCUS_STRIP) || defined(BOARD_T_EMBED)
 lv_font_t font_kr_16;
 #endif
 
@@ -865,7 +875,15 @@ static void disp_flush(lv_display_t* display, const lv_area_t* area, uint8_t* px
     }
 
 
-#if defined(BOARD_IPS35)
+#if defined(BOARD_WAVESHARE_349)
+    if (s_frame) {
+        const uint16_t* src = (const uint16_t*)px_map;
+        for (uint32_t y = 0; y < h; y++) {
+            memcpy(&s_frame[(area->y1 + y) * SCREEN_W + area->x1], &src[y * stride_pixels], w * 2);
+        }
+        if (lv_display_flush_is_last(display)) s_panel.push(s_frame);
+    }
+#elif defined(BOARD_IPS35)
     // AXS15231B via Canvas: draw partial area to buffer, flush only on last area (handle stride alignment)
     if (stride_pixels == w) {
         gfx->draw16bitBeRGBBitmap(area->x1, area->y1, (uint16_t*)px_map, w, h);
@@ -984,8 +1002,11 @@ static bool s_touchTrace = false;
 
 // LVGL touch read callback
 static void touch_read(lv_indev_t* indev, lv_indev_data_t* data) {
-    uint16_t x, y;
-#if defined(BOARD_T_DISPLAY_PRO)
+    uint16_t x = 0, y = 0;
+#if defined(BOARD_WAVESHARE_349)
+    // The Focus Strip's gesture layer is the only touch consumer.
+    if (false) {
+#elif defined(BOARD_T_DISPLAY_PRO)
     // Pocket (portrait) mode drives LVGL widgets directly — raw CST226SE
     // points are rotation-0 display coords. Landscape keeps the ticker's own
     // gesture layer as the sole consumer (two pollers fight over press state),
@@ -1412,6 +1433,20 @@ void displayInit() {
     g_screenW = BOARD_NATIVE_H;
     g_screenH = BOARD_NATIVE_W;
 
+#elif defined(BOARD_WAVESHARE_349)
+    Serial.println("[Display] === Waveshare 3.49 AXS15231B QSPI 640x172 ===");
+    Ws349::earlyPower();
+    Ws349::backlightBegin();
+    Ws349::brightness(0);
+    s_frame = (uint16_t*)heap_caps_calloc(SCREEN_W * SCREEN_H, 2, MALLOC_CAP_SPIRAM);
+    if (!s_frame || !s_panel.begin()) {
+        Serial.println("[Display] panel init FAILED");
+    } else {
+        s_panel.push(s_frame);   // black before the backlight comes on
+        Ws349::brightness(255);
+        Serial.println("[Display] panel ready");
+    }
+
 #else
     // LovyanGFX path (BOX_86, TTGO T-Display, etc.)
     Serial.println("[Display] Calling tft.init()...");
@@ -1524,7 +1559,7 @@ void displayInit() {
     // instead of dropping to the 12px face beside 16–20px Latin.
     font_kr_16 = lv_font_montserrat_16; font_kr_16.fallback = &font_noto_kr_16;
     font_kr_20 = lv_font_montserrat_20; font_kr_20.fallback = &font_noto_kr_16;
-#elif defined(BOARD_T_DISPLAY_PRO) || defined(BOARD_T_EMBED)
+#elif defined(BOARD_FOCUS_STRIP) || defined(BOARD_T_EMBED)
     // Companion surfaces are read from farther away than the older small HUDs;
     // keep Korean primary text at the same 16px tier as Latin.
     font_kr_16 = lv_font_montserrat_16; font_kr_16.fallback = &font_noto_kr_16;
@@ -1590,7 +1625,7 @@ void displayInit() {
 #endif
     lv_display_set_buffers(disp, buf1, buf2, bufSize,
                            LV_DISPLAY_RENDER_MODE_PARTIAL);
-#if defined(BOARD_IPS10)
+#if defined(BOARD_IPS10) || defined(BOARD_WAVESHARE_349)
     lv_display_set_color_format(disp, LV_COLOR_FORMAT_RGB565);
     Serial.printf("[Display] LVGL initialized %dx%d (RGB565 native)\n", g_screenW, g_screenH);
     logHeap("ips10-draw-buffers");
@@ -1658,7 +1693,9 @@ static void tdisplayProSetBacklightLevel(uint8_t value) {
 void setBrightness(int level) {
     if (level < 0) level = 0;
     if (level > 255) level = 255;
-#if defined(BOARD_T_DISPLAY_PRO)
+#if defined(BOARD_WAVESHARE_349)
+    Ws349::brightness((uint8_t)level);
+#elif defined(BOARD_T_DISPLAY_PRO)
     tdisplayProSetBacklightLevel(level == 0 ? 0 : (uint8_t)(1 + (level * 15) / 255));
 #elif defined(BOARD_AMOLED)
     // AMOLED: simple on/off via BL pin (no PWM)

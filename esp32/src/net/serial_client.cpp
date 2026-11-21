@@ -59,7 +59,7 @@ namespace Net {
 static void sendHeartbeatAck();
 
 void serialWriteJsonLine(const char* buf) {
-#if defined(BOARD_EINK_SURFACE) || defined(BOARD_T_DISPLAY_PRO)
+#if defined(BOARD_EINK_SURFACE) || defined(BOARD_FOCUS_STRIP)
     // HWCDC (USB-Serial/JTAG) on this core loses entire 64-byte FIFO blocks
     // when a write spans multiple blocks (measured: deterministic 64-byte
     // holes mid-line, 7/10 corrupt device_info replies). Pace one FIFO block
@@ -69,7 +69,7 @@ void serialWriteJsonLine(const char* buf) {
     // recipe (60 B / 300 µs) while daemon broadcasts streamed inbound — the
     // ack-only-keepalive note below already records that full-duplex raises
     // the drop odds. Sub-FIFO blocks with a longer settle survive it.
-#if defined(BOARD_T_DISPLAY_PRO)
+#if defined(BOARD_FOCUS_STRIP)
     constexpr size_t CHUNK = 48;
     constexpr uint32_t SETTLE_US = 500;
 #else
@@ -108,6 +108,8 @@ static void sendDeviceInfoSerial() {
     resp["board"] = "t_embed";
     #elif defined(BOARD_T_DISPLAY_PRO)
     resp["board"] = "t_display_pro";
+    #elif defined(BOARD_WAVESHARE_349)
+    resp["board"] = "waveshare_349";
     #elif defined(BOARD_ESP32_C6_147)
     resp["board"] = "esp32_c6_147";
     #elif IS_ROUND

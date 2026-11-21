@@ -29,8 +29,18 @@
 // Upload-failure banner (cross-core-safe slot post; see hud_bar.h). The
 // upload itself is a hand-paced raw socket, not HTTPClient — see
 // pumpVoiceHttp for why that matters on this board.
-#include "../ui/widgets/hud_bar.h"
 #include <esp_heap_caps.h>
+#if defined(BOARD_FOCUS_STRIP)
+#include "../ui/ticker/ticker_ui.h"
+#define VOICE_NOTIFY(text) Ticker::notify(text)
+#else
+#include "../ui/widgets/hud_bar.h"
+#define VOICE_NOTIFY(text) HUD::notify(text)
+#endif
+#endif
+// Spoken replies pulled over HTTP: only boards that can play them.
+#if defined(BOARD_VOICE_HTTP_UPLOAD) && defined(BOARD_HAS_SPEAKER)
+#define VOICE_HTTP_REPLY 1
 #endif
 #include "auth_websocket_client.h"
 #include <Arduino.h>
@@ -109,6 +119,7 @@ static uint32_t voiceHttpFirstTryMs = 0;
 static bool voiceHttpRejoinKicked = false;
 static constexpr uint32_t VOICE_HTTP_DEADLINE_MS = 12000;
 
+#if defined(VOICE_HTTP_REPLY)
 // ── spoken-reply HTTP pull (network core → PSRAM → local playback) ──
 // See queueVoiceReplyDownload in ws_client.h for why this replaces WS binary
 // streaming on this board. The buffer is PSRAM and reused per reply.
@@ -162,6 +173,7 @@ static void replyFeedTask(void*) {
 #endif
     vTaskDelete(nullptr);
 }
+#endif  // VOICE_HTTP_REPLY
 #endif
 
 // ── photo upload (UI shutter → network core) ──
@@ -579,12 +591,14 @@ bool audioBacklogged() {
 }
 #endif  // BOARD_HAS_VOICE_CAPTURE
 
-#if !defined(BOARD_VOICE_HTTP_UPLOAD)
+#if !defined(VOICE_HTTP_REPLY)
 // Boards without the HTTP voice path keep the API but always refuse, which
 // routes the capture module down its live-streaming branch.
+#if !defined(BOARD_VOICE_HTTP_UPLOAD)
 bool queueVoiceHttpUpload(const uint8_t*, size_t, const char*, const char*,
                           uint32_t, uint32_t) { return false; }
 bool voiceUploadBusy() { return false; }
+#endif
 bool queueVoiceReplyDownload(uint32_t, uint32_t) { return false; }
 #else
 bool queueVoiceReplyDownload(uint32_t expectedBytes, uint32_t sampleRate) {
@@ -739,7 +753,7 @@ static void pumpVoiceReplyDownload() {
 #endif
     }
 }
-#endif  // !BOARD_VOICE_HTTP_UPLOAD (stubs) / implementation
+#endif  // !VOICE_HTTP_REPLY (stubs) / implementation
 
 #if defined(BOARD_VOICE_HTTP_UPLOAD)
 bool queueVoiceHttpUpload(const uint8_t* pcm, size_t len, const char* board,
@@ -834,7 +848,7 @@ static void pumpVoiceHttp() {
     if (voiceHttpFirstTryMs == 0) voiceHttpFirstTryMs = now;
     if ((uint32_t)(now - voiceHttpFirstTryMs) > VOICE_HTTP_DEADLINE_MS) {
         Serial.println("[Voice] upload deadline exceeded — giving up");
-        HUD::notify("Voice upload failed - network wedged");
+        VOICE_NOTIFY("Voice upload failed - network wedged");
 #if defined(BOARD_IPS10)
         Audio::micVoiceResult(false);
 #endif
@@ -966,7 +980,7 @@ static void pumpVoiceHttp() {
             if (voiceHttpAttempts >= 2 && !voiceHttpRejoinKicked) {
                 voiceHttpRejoinKicked = true;
                 Serial.println("[Voice] bouncing STA to un-wedge hosted link");
-                HUD::notify("Network wedged - rejoining WiFi...");
+                VOICE_NOTIFY("Network wedged - rejoining WiFi...");
                 Net::wifiSetRadioParked(true);
                 Net::wifiSetRadioParked(false);
             }
@@ -987,7 +1001,7 @@ static void pumpVoiceHttp() {
         // report locally AND on the transport the daemon does read.
         char note[64];
         snprintf(note, sizeof(note), "Voice upload failed (http %d)", code);
-        HUD::notify(note);
+        VOICE_NOTIFY(note);
         char diag[120];
         snprintf(diag, sizeof(diag),
                  "{\"type\":\"voice_abort\",\"reason\":\"http_%d\",\"total\":%u}",
@@ -1084,6 +1098,8 @@ void pumpOutbound() {
 #endif
 #if defined(BOARD_VOICE_HTTP_UPLOAD)
     pumpVoiceHttp();
+#endif
+#if defined(VOICE_HTTP_REPLY)
     pumpVoiceReplyDownload();
 #endif
 }

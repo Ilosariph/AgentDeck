@@ -6760,6 +6760,10 @@ export async function startDaemon(opts: DaemonOptions): Promise<void> {
       }
       return true; // consumed
     }
+    if (msg.type === 'voice_confirm') {
+      confirmVoiceDraft(msg as { sessionId?: unknown; send?: unknown }, stableSink(sender));
+      return true; // consumed
+    }
     if (msg.type === 'voice_abort') {
       // The board tried to upload an utterance over HTTP and failed; the
       // reason would otherwise only exist on its serial console.
@@ -7712,6 +7716,8 @@ export async function startDaemon(opts: DaemonOptions): Promise<void> {
             { type: 'voice_result', text: '', error: 'empty_capture' }));
         } catch { /* port closing */ }
       }
+    } else if (msg.type === 'voice_confirm') {
+      confirmVoiceDraft(msg as { sessionId?: unknown; send?: unknown }, serialSinkFor(port));
     } else if (msg.type === 'voice_abort') {
       log(`[agentdeck] voice: device upload aborted (${String((msg as { reason?: unknown }).reason ?? 'unknown')}, `
         + `${String((msg as { total?: unknown }).total ?? '?')} bytes) [serial ${port}]`);
@@ -7773,6 +7779,38 @@ export async function startDaemon(opts: DaemonOptions): Promise<void> {
 
   const personalVoiceActive = new Map<string, string>();
 
+  /**
+   * Voice drafts, per board (device key). A board that advertises
+   * `voice_draft` gets each transcript back as a draft (`voice_result` with
+   * `pending: true`) instead of having it delivered: the board shows it and
+   * answers `voice_confirm {sessionId, send}`. Further utterances for the same
+   * session append, so a long instruction can be dictated in pieces, and a
+   * misheard one is cleared without ever reaching the agent.
+   */
+  const VOICE_DRAFT_MAX_CHARS = 2000;
+  const VOICE_DRAFT_TTL_MS = 30 * 60_000;
+  const voiceDrafts = new Map<string, { sessionId: string; board: string; text: string; at: number }>();
+
+  const confirmVoiceDraft = (msg: { sessionId?: unknown; send?: unknown }, sink: ReplySink): void => {
+    const device = sink.deviceKey();
+    const draft = voiceDrafts.get(device);
+    voiceDrafts.delete(device);
+    const fresh = draft && Date.now() - draft.at < VOICE_DRAFT_TTL_MS;
+    if (!draft || !fresh || msg.send !== true) {
+      log(`[agentdeck] voice: draft ${msg.send === true ? 'expired or missing' : 'cleared'} on ${sink.describe()}`);
+      if (msg.send === true) {
+        try {
+          sink.send(JSON.stringify({ type: 'voice_result', text: '', sessionId: draft?.sessionId ?? '',
+            delivered: false, deliverReason: 'draft expired' }));
+        } catch { /* client disconnecting */ }
+      }
+      return;
+    }
+    void finishVoiceCapture({
+      wavPath: '', sessionId: draft.sessionId, board: draft.board, transcript: draft.text, cleanup: () => {},
+    }, sink);
+  };
+
   const finishVoiceCapture = async (
     captured: {
       wavPath: string;
@@ -7780,6 +7818,8 @@ export async function startDaemon(opts: DaemonOptions): Promise<void> {
       board: string;
       integrityError?: string;
       requestId?: number;
+      /** Already transcribed (a confirmed draft): deliver as is, never hold. */
+      transcript?: string;
       cleanup: () => void;
     },
     sink: ReplySink,
@@ -7796,7 +7836,8 @@ export async function startDaemon(opts: DaemonOptions): Promise<void> {
             throw new Error(captured.integrityError);
           }
           const transcriptionStarted = performance.now();
-          const text = await transcribeDeviceAudio(captured.wavPath, loadDaemonSettings().voice as VoiceTranscriptionSettings | undefined);
+          const text = captured.transcript
+            ?? await transcribeDeviceAudio(captured.wavPath, loadDaemonSettings().voice as VoiceTranscriptionSettings | undefined);
           log(`[agentdeck] voice latency: transcriptionMs=${Math.round(performance.now() - transcriptionStarted)}`
             + ` requestId=${captured.requestId ?? 'none'} board=${device}`);
           if (!isCurrent()) return;
@@ -7847,6 +7888,19 @@ export async function startDaemon(opts: DaemonOptions): Promise<void> {
           }
           const sessionId = resolveDeviceSessionId(captured.sessionId);
           debug('voice', `transcript "${text.slice(0, 60)}" → ${sessionId.slice(0, 20) || '(no session)'}`);
+          if (text && sessionId && captured.transcript === undefined
+            && sink.capabilities().includes('voice_draft')) {
+            const prev = voiceDrafts.get(device);
+            const fresh = prev && prev.sessionId === sessionId && Date.now() - prev.at < VOICE_DRAFT_TTL_MS;
+            const draft = (fresh ? `${prev.text} ${text}` : text).slice(0, VOICE_DRAFT_MAX_CHARS);
+            voiceDrafts.set(device, { sessionId, board: captured.board, text: draft, at: Date.now() });
+            log(`[agentdeck] voice: draft "${draft.slice(0, 40)}" for ${sessionId.slice(0, 32)} held on ${sink.describe()}`);
+            try {
+              sink.send(JSON.stringify({ type: 'voice_result', requestId: captured.requestId, text: draft,
+                sessionId, pending: true, delivered: false }));
+            } catch { /* client disconnecting */ }
+            return;
+          }
           // Always tell the board what was heard, even when it is empty or
           // unroutable — a device that shows nothing is indistinguishable
           // from a broken mic.

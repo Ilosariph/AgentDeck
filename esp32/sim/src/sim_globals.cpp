@@ -22,7 +22,7 @@ lv_font_t font_kr_12 = lv_font_montserrat_12;
 // Which larger Korean-safe faces exist is a per-board contract declared in
 // ui/display.h — mirror that condition exactly, or the board's UI references a
 // face this file never defined (T-Embed/T-Display-Pro use font_kr_16 too).
-#if defined(BOARD_IPS10) || defined(BOARD_T_EMBED) || defined(BOARD_T_DISPLAY_PRO)
+#if defined(BOARD_IPS10) || defined(BOARD_T_EMBED) || defined(BOARD_FOCUS_STRIP)
 // Latin renders from Montserrat at size; 한글 falls back to the 16px Noto face
 // — same chain as the device (display.cpp).
 extern "C" const lv_font_t font_noto_kr_16;
@@ -34,7 +34,7 @@ lv_font_t font_kr_20 = lv_font_montserrat_20;
 static struct KrFontInit {
     KrFontInit() {
         font_kr_12.fallback = &font_noto_kr_12;
-#if defined(BOARD_IPS10) || defined(BOARD_T_EMBED) || defined(BOARD_T_DISPLAY_PRO)
+#if defined(BOARD_IPS10) || defined(BOARD_T_EMBED) || defined(BOARD_FOCUS_STRIP)
         font_kr_16.fallback = &font_noto_kr_16;
 #endif
 #if defined(BOARD_IPS10)
@@ -101,7 +101,7 @@ const char* last() { return Net::lastCommand; }
 // answer for them the way an online, USB-powered unit would — otherwise the
 // frame shows the disconnected/no-battery layout, which is not what the board
 // looks like in use.
-#if defined(BOARD_T_EMBED) || defined(BOARD_T_DISPLAY_PRO)
+#if defined(BOARD_T_EMBED) || defined(BOARD_FOCUS_STRIP)
 #include "net/ws_client.h"
 #include "input/power_monitor.h"
 namespace Net {
@@ -124,7 +124,7 @@ PowerStatus powerStatus() {
 // The sim renders the bare unit — `present()` false, so the strip keeps its
 // three pages and never grows CAM. A camera page here could only show a fake
 // preview, which is exactly what this simulator exists to avoid.
-#if defined(BOARD_T_DISPLAY_PRO)
+#if defined(BOARD_FOCUS_STRIP)
 #include "camera/photo_capture.h"
 namespace Camera {
 bool present() { return false; }

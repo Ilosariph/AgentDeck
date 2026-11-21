@@ -1,11 +1,15 @@
-#if defined(BOARD_T_DISPLAY_PRO) || defined(BOARD_LILYGO_EPD47)
+#if defined(BOARD_T_DISPLAY_PRO) || defined(BOARD_LILYGO_EPD47) || defined(BOARD_WAVESHARE_349)
 
 #include "touch_strip.h"
 #include "../../boards/board_config.h"
 
 #include <Arduino.h>
 #include <Wire.h>
-#if defined(BOARD_LILYGO_EPD47)
+#if defined(BOARD_WAVESHARE_349)
+// The AXS15231B's own touch controller; the driver already reports landscape
+// frame coordinates and debounces the chip's missing lift report.
+#include "../drivers/waveshare_349.h"
+#elif defined(BOARD_LILYGO_EPD47)
 #include <touch.h>
 #include <TouchDrvGT911.hpp>
 #else
@@ -24,7 +28,7 @@ static EpdTouchController s_epdController = EpdTouchController::NONE;
 static uint8_t s_touchAddress = 0;
 static uint8_t s_i2cDeviceCount = 0;
 static bool s_rtcSeen = false;
-#else
+#elif !defined(BOARD_WAVESHARE_349)
 static TouchDrvCSTXXX s_touch;
 #endif
 static bool s_enabled = false;
@@ -65,6 +69,8 @@ static constexpr LandscapePoint mapLandscapePoint(int16_t x, int16_t y) {
     // (swap XY, mirror Y). The owned panel's framebuffer is then presented at
     // rotation 2, so touch must follow the same final 180-degree transform.
     return {(int16_t)(SCREEN_W - 1 - x), (int16_t)(SCREEN_H - 1 - y)};
+#elif defined(BOARD_WAVESHARE_349)
+    return {x, y};
 #elif BOARD_ROTATION == 1
     return {y, (int16_t)(BOARD_NATIVE_W - 1 - x)};
 #elif BOARD_ROTATION == 3
@@ -159,6 +165,9 @@ bool touchInit() {
         Serial.printf("[Touch] no supported controller; bus devices=%u rtc=%u — touch disabled\n",
                       s_i2cDeviceCount, s_rtcSeen ? 1 : 0);
     }
+#elif defined(BOARD_WAVESHARE_349)
+    s_enabled = Ws349::touchBegin();
+    Serial.println(s_enabled ? "[Touch] AXS15231B ready" : "[Touch] AXS15231B not answering — touch disabled");
 #else
     s_touch.setPins(BOARD_PIN_TOUCH_RST, BOARD_PIN_TOUCH_INT);
     // The controller needs settle time after its reset pulse — retry the
@@ -179,7 +188,9 @@ bool touchReady() {
 }
 
 uint8_t touchAddress() {
-#if defined(BOARD_LILYGO_EPD47)
+#if defined(BOARD_WAVESHARE_349)
+    return s_enabled ? BOARD_TOUCH_ADDR : 0;
+#elif defined(BOARD_LILYGO_EPD47)
     return s_touchAddress;
 #else
     return s_enabled ? CST226SE_SLAVE_ADDRESS : 0;
@@ -208,7 +219,9 @@ bool touchPortrait() { return s_portrait; }
 
 static bool readControllerPoint(int16_t* x, int16_t* y) {
     if (!x || !y) return false;
-#if defined(BOARD_LILYGO_EPD47)
+#if defined(BOARD_WAVESHARE_349)
+    return Ws349::touch(*x, *y);
+#elif defined(BOARD_LILYGO_EPD47)
     if (s_epdController == EpdTouchController::GT911) {
         int16_t xs[5] = {0}, ys[5] = {0};
         uint8_t supported = s_gtTouch.getSupportTouchPoint();
@@ -334,4 +347,4 @@ TouchEvent touchPoll(uint32_t nowMs) {
 
 }  // namespace Input
 
-#endif  // BOARD_T_DISPLAY_PRO || BOARD_LILYGO_EPD47
+#endif  // BOARD_T_DISPLAY_PRO || BOARD_LILYGO_EPD47 || BOARD_WAVESHARE_349

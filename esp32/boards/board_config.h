@@ -27,6 +27,8 @@
     #include "board_t_embed.h"
 #elif defined(BOARD_T_DISPLAY_PRO)
     #include "board_t_display_pro.h"
+#elif defined(BOARD_WAVESHARE_349)
+    #include "board_waveshare_349.h"
 #else
     #error "No board defined! Use -DBOARD_IPS35, -DBOARD_BOX_86, -DBOARD_AMOLED, -DBOARD_LED8X32, -DBOARD_TTGO, -DBOARD_ESP32_C6_147, or -DBOARD_IPS10"
 #endif
@@ -58,6 +60,8 @@ inline const char* agentdeckBoardName() {
         return "t_embed";
     #elif defined(BOARD_T_DISPLAY_PRO)
         return "t_display_pro";
+    #elif defined(BOARD_WAVESHARE_349)
+        return "waveshare_349";
     #elif defined(BOARD_ESP32_C6_147)
         return "esp32_c6_147";
     #elif defined(BOARD_AMOLED) || defined(BOARD_ROUND_AMOLED)

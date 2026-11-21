@@ -1,4 +1,4 @@
-#if defined(BOARD_T_DISPLAY_PRO)
+#if defined(BOARD_FOCUS_STRIP)
 #include "usage_panel.h"
 #include <cstdio>
 #include "../theme.h"

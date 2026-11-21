@@ -39,7 +39,7 @@
 #define LV_FONT_MONTSERRAT_20 1
 /* Headline size for the two glance-first companions only: the pager home on
  * the knob and the lane board on the strip. Other boards do not pay for it. */
-#if defined(BOARD_T_EMBED) || defined(BOARD_T_DISPLAY_PRO)
+#if defined(BOARD_T_EMBED) || defined(BOARD_FOCUS_STRIP)
 #define LV_FONT_MONTSERRAT_28 1
 #endif
 #define LV_FONT_DEFAULT &lv_font_montserrat_14

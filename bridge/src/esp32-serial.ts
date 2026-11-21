@@ -1199,7 +1199,7 @@ export function handleSerialLine(conn: SerialConnection, line: string): void {
           persistDeviceInfoCache();
         }
       } else if (msg.type === 'voice_begin' || msg.type === 'voice_end' ||
-                 msg.type === 'audio_chunk' || msg.type === 'voice_abort' ||
+                 msg.type === 'audio_chunk' || msg.type === 'voice_abort' || msg.type === 'voice_confirm' ||
                  msg.type === 'photo_begin' || msg.type === 'photo_end' ||
                  msg.type === 'photo_chunk') {
         // Voice/photo over USB. The serial transport is line-delimited JSON, so

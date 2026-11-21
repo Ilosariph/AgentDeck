@@ -106,7 +106,8 @@ int main(int argc, char** argv) {
 // T-Display-S3-Pro ticker. Only the create/update pair differs per board.
 #if defined(BOARD_T_EMBED)
 #include "ui/knob/knob_ui.h"
-#elif defined(BOARD_T_DISPLAY_PRO)
+#elif defined(BOARD_FOCUS_STRIP)
+#include "../boards/board_config.h"   // BOARD_HAS_VOICE_CAPTURE
 #include "ui/ticker/ticker_ui.h"
 #else
 #include "ui/screens/aquarium.h"
@@ -157,7 +158,7 @@ static bool visibleDotTag(lv_obj_t* obj) {
 #if defined(BOARD_T_EMBED)
 void treeCreate() { Knob::create(); }             // loads its own screen
 void treeUpdate(float dt) { Knob::update(dt); }
-#elif defined(BOARD_T_DISPLAY_PRO)
+#elif defined(BOARD_FOCUS_STRIP)
 void treeCreate() { Ticker::create(); }
 void treeUpdate(float dt) { Ticker::update(dt); }
 #else
@@ -172,7 +173,7 @@ bool renderScene(const char* scene, const char* path, int frames, const char* pa
     return false;
   }
   randomSeed(0xA6E7DECC);  // deterministic frames per run
-#if defined(BOARD_T_DISPLAY_PRO)
+#if defined(BOARD_FOCUS_STRIP)
   // Physical rocker navigation, exercised without a hand-authored preview.
   // Attention updates the rail without taking over the current page.
   if (std::strcmp(page, "usage") == 0) Ticker::nextPage();
@@ -180,6 +181,19 @@ bool renderScene(const char* scene, const char* path, int frames, const char* pa
     Ticker::nextPage();
     Ticker::nextPage();
   }
+#if defined(BOARD_HAS_VOICE_CAPTURE)
+  // Push-to-talk states: --page listening | draft (the voice view owns the body).
+  else if (std::strcmp(page, "listening") == 0 || std::strcmp(page, "draft") == 0) {
+    char sid[32] = {0};
+    Ticker::voiceTarget(sid, sizeof(sid));
+    Ticker::voiceRecording(true);
+    if (std::strcmp(page, "draft") == 0) {
+      Ticker::voiceRecording(false);
+      Ticker::onVoiceResult("Please add a unit test for the parser and then run the whole test suite "
+                            "before you commit anything", true, "");
+    }
+  }
+#endif
 #else
   (void)page;
 #endif
@@ -634,7 +648,7 @@ int main(int argc, char** argv) {
 
   const char* scene = arg(argc, argv, "--scene", "working");
   std::string def = std::string("sim-out/") + label + "-" + scene;
-#if defined(BOARD_T_DISPLAY_PRO)
+#if defined(BOARD_FOCUS_STRIP)
   if (std::strcmp(page, "focus") != 0) def += std::string("-") + page;
 #endif
   def += ".png";

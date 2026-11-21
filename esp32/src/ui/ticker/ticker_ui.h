@@ -7,6 +7,7 @@
 // a hold on the Usage page switches to portrait Pocket (StripLayout).
 
 #include "../../input/touch_strip.h"
+#include <stddef.h>
 
 namespace Ticker {
 
@@ -24,6 +25,22 @@ void onTouch(const Input::TouchEvent& event);
 
 /** Daemon's photo_result for a snap sent from the CAM page. */
 void onPhotoResult(bool delivered, const char* detail);
+#if defined(BOARD_HAS_VOICE_CAPTURE)
+// Push-to-talk (hold BOOT). The transcript comes back as a draft the board
+// sends or clears; the daemon holds the text (voice_confirm).
+/** The session a recording goes to (pinned, else the focus pick). UI task. */
+bool voiceTarget(char* id, size_t idLen);
+/** Recording started (true) or stopped and uploading (false). UI task. */
+void voiceRecording(bool on);
+/** Recording dropped before upload (too short, no WiFi). UI task. */
+void voiceCancelled();
+bool voiceDraftActive();
+void voiceSend();
+void voiceClear();
+/** voice_result from the daemon (network task): `pending` = a draft held for
+ *  send/clear; otherwise `note` is the outcome to flash. */
+void onVoiceResult(const char* text, bool pending, const char* note);
+#endif
 #if defined(SIM_HOST)
 const char* displayedSessionId();
 bool isPinned();

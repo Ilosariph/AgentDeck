@@ -51,6 +51,13 @@
 #include "input/nfc_reader.h"
 #include "input/ir_receiver.h"
 #include "audio/mic_capture.h"
+#elif defined(BOARD_WAVESHARE_349)
+#include "ui/display.h"
+#include "ui/ticker/ticker_ui.h"
+#include "input/touch_strip.h"
+#include "input/power_monitor.h"
+#include "audio/mic_capture.h"
+#include "drivers/waveshare_349.h"
 #elif defined(BOARD_T_DISPLAY_PRO)
 #include "ui/display.h"
 #include "ui/ticker/ticker_ui.h"
@@ -72,7 +79,7 @@
 DashboardState g_state;
 SemaphoreHandle_t g_stateMutex = nullptr;
 
-#if !defined(BOARD_LED8X32) && !defined(BOARD_EINK_SURFACE) && !defined(BOARD_T_EMBED) && !defined(BOARD_T_DISPLAY_PRO)
+#if !defined(BOARD_LED8X32) && !defined(BOARD_EINK_SURFACE) && !defined(BOARD_T_EMBED) && !defined(BOARD_FOCUS_STRIP)
 // ===== Screen objects (LVGL boards only) =====
 static lv_obj_t* scrSplash = nullptr;
 static lv_obj_t* scrAquarium = nullptr;
@@ -402,7 +409,124 @@ static void networkTask(void* param) {
     }
 }
 
-#if defined(BOARD_T_DISPLAY_PRO)
+#if defined(BOARD_WAVESHARE_349)
+// ===== UI task — Focus Strip on the Waveshare 3.49 (Core 1) =====
+// 640x172 strip: touch tabs/actions, two buttons on the short side.
+//   BOOT  tap: pin/unpin the focus (or send the voice draft)
+//         hold: push-to-talk to the pinned/focused session
+//   PWR   tap: next page (or clear the voice draft)
+//         hold 2 s: power off (battery only; USB keeps the board on)
+static void stripApplyBrightness() {
+    static int lastApplied = -1;
+    lockState();
+    const bool hostOn = g_state.hostDisplayOn;
+    const bool dimEnabled = g_state.hostDimEnabled;
+    const uint8_t dimMode = g_state.hostDimMode;
+    const uint8_t dimLevel = g_state.hostDimLevel;
+    unlockState();
+    int target = 255;
+    if (!hostOn && dimEnabled) target = (dimMode == 0) ? 0 : dimLevel;
+    if (target != lastApplied) {
+        lastApplied = target;
+        UI::setBrightness(target);
+    }
+}
+
+static void uiTask(void* param) {
+    Serial.printf("[UI] Strip task started on core %d\n", xPortGetCoreID());
+    UI::displayInit();
+    Input::touchInit();
+    Input::powerInit();
+    Audio::micInit();
+    Ticker::create();
+
+    pinMode(BOARD_PIN_BTN_BOOT, INPUT_PULLUP);
+    pinMode(BOARD_PIN_BTN_PWR, INPUT_PULLUP);
+    constexpr uint32_t TALK_HOLD_MS = 400, OFF_HOLD_MS = 2000, MIN_TALK_MS = 300;
+    bool bootDown = false, bootTalking = false, pwrDown = false, pwrFired = false;
+    uint32_t bootSince = 0, pwrSince = 0, talkSince = 0;
+
+    uint32_t lastFrameMs = millis();
+    while (true) {
+        uint32_t now = millis();
+        uint32_t dt_ms = now - lastFrameMs;
+        float dt = dt_ms / 1000.0f;
+        lastFrameMs = now;
+        if (dt > 0.1f) dt = 0.1f;
+        if (dt_ms > 0) lv_tick_inc(dt_ms);
+
+        // BOOT: a hold talks, a tap acts on release.
+        const bool boot = digitalRead(BOARD_PIN_BTN_BOOT) == LOW;
+        if (boot && !bootDown) { bootDown = true; bootSince = now; }
+        if (boot && bootDown && !bootTalking && now - bootSince >= TALK_HOLD_MS && Audio::micReady()) {
+            char sid[32] = {0};
+            if (Ticker::voiceTarget(sid, sizeof(sid))) {
+                Ticker::voiceRecording(true);
+                Audio::micStart(sid);
+                if (Audio::micCapturing()) {
+                    bootTalking = true;
+                    talkSince = now;
+                } else {
+                    Ticker::voiceCancelled();
+                }
+            } else {
+                Ticker::notify("no session to talk to");
+            }
+            if (!bootTalking) bootSince = now + 600000;   // one attempt per hold
+        }
+        if (!boot && bootDown) {
+            bootDown = false;
+            if (bootTalking) {
+                bootTalking = false;
+                const bool tooShort = now - talkSince < MIN_TALK_MS;
+                Audio::micStop(tooShort);
+                if (tooShort) Ticker::voiceCancelled(); else Ticker::voiceRecording(false);
+            } else if (now - bootSince < TALK_HOLD_MS) {
+                if (Ticker::voiceDraftActive()) Ticker::voiceSend();
+                else Ticker::primaryAction();
+            }
+        }
+
+        // PWR: a tap acts on release, a long hold powers off.
+        const bool pwr = digitalRead(BOARD_PIN_BTN_PWR) == LOW;
+        if (pwr && !pwrDown) { pwrDown = true; pwrFired = false; pwrSince = now; }
+        if (pwr && pwrDown && !pwrFired && now - pwrSince >= OFF_HOLD_MS) {
+            pwrFired = true;
+            Ticker::notify("power off");
+            Input::powerOff();
+        }
+        if (!pwr && pwrDown) {
+            pwrDown = false;
+            if (!pwrFired && now - pwrSince >= 30) {
+                if (Ticker::voiceDraftActive()) Ticker::voiceClear();
+                else Ticker::nextPage();
+            }
+        }
+
+        lockState();
+        g_state.applyPendingSessionClear(now);
+        unlockState();
+
+        Input::TouchEvent touch = Input::touchPoll(now);
+        if (touch.gesture != Input::TouchGesture::NONE) Ticker::onTouch(touch);
+
+        stripApplyBrightness();
+        Ticker::update(dt);
+        lv_timer_handler();
+
+        {
+            static uint32_t lastHeapLogMs = 0;
+            if ((uint32_t)(now - lastHeapLogMs) >= 60000) {
+                lastHeapLogMs = now;
+                logHeap("focus-strip");
+            }
+        }
+
+        uint32_t work = millis() - now;
+        vTaskDelay(pdMS_TO_TICKS(work < RENDER_INTERVAL_MS ? (RENDER_INTERVAL_MS - work) : 1));
+    }
+}
+#elif defined(BOARD_T_DISPLAY_PRO)
 // ===== UI task — Focus Strip (Core 1) =====
 // 480x222 always-on strip: touch tabs/actions + 3 app-readable buttons,
 // LTR-553 auto-dim composed with the host display-sleep contract.
@@ -1207,7 +1331,7 @@ void setup() {
     // Also before anything allocates: internal RAM is one large free block
     // now, so the pool comes out as a single region.
     InternalReserve::begin();
-#if defined(BOARD_EINK_SURFACE) || defined(BOARD_IPS10) || defined(BOARD_T_EMBED) || defined(BOARD_T_DISPLAY_PRO)
+#if defined(BOARD_EINK_SURFACE) || defined(BOARD_IPS10) || defined(BOARD_T_EMBED) || defined(BOARD_FOCUS_STRIP)
 #if defined(BOARD_T_EMBED)
     // 16384 on the only board that receives *audio* over serial. A spoken reply
     // arrives at ~44 KB/s (base64 PCM), so an 8 KB ring covers only ~190 ms of
@@ -1278,6 +1402,13 @@ void setup() {
     for (int i = 0; i < 30 && !Serial; i++) delay(100);
     delay(200);
     Serial.println("\n=== AgentDeck T-Display-S3-Pro Focus Strip ===");
+#elif defined(BOARD_WAVESHARE_349)
+    // Battery latch first: on battery the board switches off again unless
+    // EXIO6 is driven high soon after PWR is released.
+    Ws349::earlyPower();
+    for (int i = 0; i < 30 && !Serial; i++) delay(100);
+    delay(200);
+    Serial.println("\n=== AgentDeck Waveshare 3.49 Focus Strip ===");
 #else
     // Native USB CDC: wait for host connection (up to 3 seconds)
     for (int i = 0; i < 30 && !Serial; i++) delay(100);
@@ -1302,6 +1433,8 @@ void setup() {
         "T-Embed Knob",
 #elif defined(BOARD_T_DISPLAY_PRO)
         "T-Display-S3-Pro Ticker",
+#elif defined(BOARD_WAVESHARE_349)
+        "Waveshare 3.49 Strip",
 #elif defined(BOARD_IPS35)
         "IPS 3.5\"",
 #elif defined(BOARD_BOX_86) || defined(BOARD_86_BOX)

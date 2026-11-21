@@ -1042,6 +1042,16 @@ export interface VoiceAbortMessage {
 }
 
 /**
+ * Answer to a held voice draft (`voice_result` with `pending: true`, sent to
+ * boards that advertise `voice_draft`): deliver it to the session, or drop it.
+ */
+export interface VoiceConfirmMessage {
+  type: 'voice_confirm';
+  sessionId?: string;
+  send?: boolean;
+}
+
+/**
  * Device-sourced photo capture (T-Display-S3-Pro rear camera "show-and-tell").
  * Same transport split as voice: over WebSocket the JPEG travels as binary
  * frames between `photo_begin` and `photo_end`; over serial the same bytes
@@ -1606,6 +1616,7 @@ export type ESP32ToHostMessage =
   | VoiceEndMessage
   | AudioChunkMessage
   | VoiceAbortMessage
+  | VoiceConfirmMessage
   | PhotoBeginMessage
   | PhotoEndMessage
   | PhotoChunkMessage;

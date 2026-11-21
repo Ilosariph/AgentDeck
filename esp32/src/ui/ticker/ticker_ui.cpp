@@ -1,8 +1,9 @@
-#if defined(BOARD_T_DISPLAY_PRO)
+#include "../../../boards/board_config.h"   // BOARD_HAS_VOICE_CAPTURE
+#if defined(BOARD_FOCUS_STRIP)
 #include "../companion/dot_badge.h"
 #endif
 #include "../companion/session_glance.h"
-#if defined(BOARD_T_DISPLAY_PRO)
+#if defined(BOARD_FOCUS_STRIP)
 
 #include "ticker_ui.h"
 #include "../companion/interaction_state.h"
@@ -36,7 +37,16 @@ static uint8_t pageCount() { return Camera::present() ? 4 : 3; }
 // In landscape the two short physical button pairs sit against the long
 // top/bottom edges near the right end. From left to right the upper pair is
 // previous/next (GPIO12/16); the lower pair is power-reset/Focus (RST/GPIO0).
+#if defined(BOARD_WAVESHARE_349)
+// No physical-button hint rails: BOOT and PWR sit on the board's short side,
+// and the 172 px strip needs every row for the body.
+static constexpr int KEY_RAIL_H = 0;
+#else
 static constexpr int KEY_RAIL_H = 16;
+#endif
+// Width beyond the 480 px the strip was designed at (Waveshare 3.49: 640).
+static constexpr int XS = SCREEN_W - 480;
+static_assert(XS >= 0, "Focus Strip needs at least 480 px");
 static constexpr int KEY_HINT_W = 44;
 static constexpr int KEY_HINT_GAP = 3;
 static constexpr int KEY_HINT_RIGHT_INSET = 54;
@@ -45,7 +55,7 @@ static constexpr int KEY_HINT_X =
 static constexpr int HEADER_Y = KEY_RAIL_H;
 static constexpr int HEADER_H = 30;
 static constexpr int BODY_Y = HEADER_Y + HEADER_H;
-static constexpr int BODY_H = 222 - BODY_Y - KEY_RAIL_H;
+static constexpr int BODY_H = SCREEN_H - BODY_Y - KEY_RAIL_H;
 
 // The strip rests on the session board: every session at once, readable by
 // colour from across the desk. Focus, usage and camera are one tap away.
@@ -95,6 +105,27 @@ static constexpr uint32_t CAM_PREVIEW_INTERVAL_MS = 100;
 static lv_obj_t* s_camCanvas = nullptr;
 static uint16_t* s_camBuf = nullptr;
 static uint32_t s_camLastFrameMs = 0;
+
+#if defined(BOARD_HAS_VOICE_CAPTURE)
+// Push-to-talk (hold BOOT). The daemon holds each transcript as a draft for
+// the target session until the board says send or clear, so a misheard
+// sentence never reaches the agent. Further recordings append to the draft.
+// Written by the UI task (recording) and the network task (voice_result),
+// read by the UI task: all under the state lock.
+static bool s_recording = false, s_transcribing = false;
+static uint32_t s_recSinceMs = 0, s_transcribingSinceMs = 0;
+static char s_draft[200] = {0};
+static char s_voiceSession[32] = {0}, s_voiceProject[40] = {0};
+static uint32_t s_voiceGen = 0;   // bumped on every change → re-render
+static constexpr uint32_t TRANSCRIBE_TIMEOUT_MS = 60000;
+static bool voiceViewActive() { return s_recording || s_transcribing || s_draft[0]; }
+static void sendVoiceConfirm(bool send) {
+    char buf[96];
+    snprintf(buf, sizeof(buf), "{\"type\":\"voice_confirm\",\"sessionId\":\"%s\",\"send\":%s}",
+             s_voiceSession, send ? "true" : "false");
+    Net::queueOutbound(buf);
+}
+#endif
 
 // ── outbound steering (thread-safe queue; drained on the network core) ──────
 
@@ -196,7 +227,7 @@ static lv_obj_t* makeKeyHint(lv_obj_t* rail, const char* text, int x,
     // full-edge label study.
     lv_obj_t* chip = lv_obj_create(rail);
     lv_obj_remove_style_all(chip);
-    lv_obj_set_size(chip, KEY_HINT_W, KEY_RAIL_H - 2);
+    lv_obj_set_size(chip, KEY_HINT_W, 14);
     lv_obj_set_pos(chip, x, 1);
     lv_obj_set_style_bg_color(chip, lv_color_hex(Theme::MidWater), 0);
     lv_obj_set_style_bg_opa(chip, LV_OPA_COVER, 0);
@@ -210,6 +241,7 @@ static lv_obj_t* makeKeyHint(lv_obj_t* rail, const char* text, int x,
 }
 
 static void updateKeyHints(uint32_t now) {
+    if (KEY_RAIL_H == 0) return;
     // Text is flash-backed and the label widgets live for the screen lifetime:
     // changing page/button feedback does not allocate inside the render loop.
     // Short names for the rocker capsules; computed from the cyclic page order
@@ -249,9 +281,11 @@ static void renderUsagePage() {
     const uint8_t count = UsageRows::build(g_state, groups);
     unlockState();
     // Layout switch hint: a deliberate hold anywhere on this page (onTouch).
+#if defined(BOARD_T_DISPLAY_PRO)
     lv_obj_t* hint = makeLabel(s_body, &lv_font_montserrat_12, Theme::HUDFaint,
                                "HOLD = PORTRAIT");
     lv_obj_align(hint, LV_ALIGN_BOTTOM_RIGHT, -8, -1);
+#endif
     if (count == 0) {
         lv_obj_t* l = makeLabel(s_body, &lv_font_montserrat_14, Theme::HUDDim,
                                 "Waiting for usage data...");
@@ -284,12 +318,12 @@ static uint32_t stateColorOf(const char* state) {
 static void renderFocusPage(const FocusSnap& f, bool connected) {
     if (!connected) {
         ConnectionCard::render(
-            s_body, 480, BODY_H, "OFFLINE", "Searching for AgentDeck...");
+            s_body, SCREEN_W, BODY_H, "OFFLINE", "Searching for AgentDeck...");
         return;
     }
     if (!f.have) {
         ConnectionCard::render(
-            s_body, 480, BODY_H, "NO ACTIVE SESSIONS", "AgentDeck connected", true);
+            s_body, SCREEN_W, BODY_H, "NO ACTIVE SESSIONS", "AgentDeck connected", true);
         return;
     }
 
@@ -317,7 +351,7 @@ static void renderFocusPage(const FocusSnap& f, bool connected) {
 
     lv_obj_t* proj = makeLabel(s_body, &font_kr_16, Theme::HUDText,
                                f.projectName[0] ? f.projectName : "(no project)");
-    lv_obj_set_width(proj, 235);
+    lv_obj_set_width(proj, 235 + XS);
     lv_label_set_long_mode(proj, LV_LABEL_LONG_DOT);
     lv_obj_align(proj, LV_ALIGN_TOP_LEFT, 132, 11);
 
@@ -332,7 +366,7 @@ static void renderFocusPage(const FocusSnap& f, bool connected) {
     // keeps the interaction hint stable instead of letting logs fill the strip.
     // DOT so overflow ends in an ellipsis, not a sheared half-line.
     lv_obj_t* cap = makeLabel(s_body, &font_kr_16, Theme::HUDText, f.caption);
-    lv_obj_set_width(cap, 452);
+    lv_obj_set_width(cap, 452 + XS);
     lv_label_set_long_mode(cap, LV_LABEL_LONG_DOT);
     lv_obj_set_style_text_line_space(cap, 6, 0);
     lv_obj_set_height(cap, f.awaiting ? 62 : 27);
@@ -358,8 +392,8 @@ static void renderFocusPage(const FocusSnap& f, bool connected) {
             lv_obj_t* text = makeLabel(chip, &lv_font_montserrat_16, 0xFFFFFF, label);
             lv_obj_align(text, LV_ALIGN_CENTER, 0, 0);
         };
-        actionChip(272, 92, "DENY", Theme::StatusRed);
-        actionChip(372, 96, "ALLOW", Theme::StatusGreen);
+        actionChip(272 + XS, 92, "DENY", Theme::StatusRed);
+        actionChip(372 + XS, 96, "ALLOW", Theme::StatusGreen);
         lv_obj_t* hint = makeLabel(s_body, &lv_font_montserrat_12,
                                    Theme::HUDFaint, "tap a labelled action");
         lv_obj_align(hint, LV_ALIGN_BOTTOM_LEFT, 16, -11);
@@ -379,7 +413,7 @@ static void renderFocusPage(const FocusSnap& f, bool connected) {
         lv_obj_set_pos(label, 16, 98);
         auto* result = makeLabel(s_body, &font_kr_16, Theme::HUDText,
                                  f.result[0] ? f.result : "No result yet");
-        lv_obj_set_pos(result, 16, 116); lv_obj_set_size(result, 452, 40);
+        lv_obj_set_pos(result, 16, 116); lv_obj_set_size(result, 452 + XS, BODY_H - 116 < 40 ? BODY_H - 116 : 40);
         lv_label_set_long_mode(result, LV_LABEL_LONG_DOT);
     }
 
@@ -445,7 +479,7 @@ static void renderSessionsPage() {
 
     if (n == 0) {
         ConnectionCard::render(
-            s_body, 480, BODY_H, s_waitingFilter ? "NO WAITING REQUESTS" : "NO ACTIVE SESSIONS", "AgentDeck connected", true);
+            s_body, SCREEN_W, BODY_H, s_waitingFilter ? "NO WAITING REQUESTS" : "NO ACTIVE SESSIONS", "AgentDeck connected", true);
         return;
     }
 
@@ -453,7 +487,7 @@ static void renderSessionsPage() {
     // three rows did, and the top band carries state without reading a word.
     const bool paged = s_sessionTotal > LANES;
     const int laneH = BODY_H - (paged ? 18 : 2);
-    s_laneWidth = 480 / n;
+    s_laneWidth = SCREEN_W / n;
     for (uint8_t i = 0; i < n; i++) {
         Utf8::sanitizeLvglText(rows[i].projectName);
         Utf8::sanitizeLvglText(rows[i].line);
@@ -599,6 +633,62 @@ static void renderCameraPage() {
     lv_obj_align(hint, LV_ALIGN_TOP_LEFT, 262, 96);
 }
 
+#if defined(BOARD_HAS_VOICE_CAPTURE)
+static constexpr int VOICE_CHIP_W = 96, VOICE_CHIP_H = 34;
+static constexpr int VOICE_SEND_X = SCREEN_W - 8 - VOICE_CHIP_W;
+static constexpr int VOICE_CLEAR_X = VOICE_SEND_X - 8 - VOICE_CHIP_W;
+static constexpr int VOICE_CHIP_Y = BODY_H - 4 - VOICE_CHIP_H;
+
+// Caller holds no lock; copies what it shows under the state lock.
+static void renderVoicePage(uint32_t now) {
+    char draft[sizeof(s_draft)], project[sizeof(s_voiceProject)];
+    bool recording, transcribing;
+    uint32_t recMs;
+    lockState();
+    Companion::copy(draft, s_draft);
+    Companion::copy(project, s_voiceProject);
+    recording = s_recording;
+    transcribing = s_transcribing;
+    recMs = now - s_recSinceMs;
+    unlockState();
+    Utf8::sanitizeLvglText(draft);
+    Utf8::sanitizeLvglText(project);
+
+    char title[80];
+    if (recording) snprintf(title, sizeof(title), LV_SYMBOL_AUDIO "  LISTENING %lus  ->  %s",
+                            (unsigned long)(recMs / 1000), project[0] ? project : "(no session)");
+    else if (transcribing) snprintf(title, sizeof(title), "TRANSCRIBING...  ->  %s", project);
+    else snprintf(title, sizeof(title), "DRAFT  ->  %s", project);
+    lv_obj_t* t = makeLabel(s_body, &font_kr_12, recording ? Theme::StatusRed : Theme::StatusCyan, title);
+    lv_obj_set_pos(t, 16, 8);
+
+    lv_obj_t* text = makeLabel(s_body, &font_kr_16, Theme::HUDText,
+                               draft[0] ? draft : recording ? "Speak now, release BOOT to stop" : "");
+    lv_obj_set_pos(text, 16, 30);
+    lv_obj_set_size(text, SCREEN_W - 32, VOICE_CHIP_Y - 36);
+    lv_label_set_long_mode(text, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_line_space(text, 4, 0);
+
+    if (!draft[0] || recording) return;
+    auto chip = [&](int x, const char* label, uint32_t color) {
+        lv_obj_t* c = lv_obj_create(s_body);
+        lv_obj_remove_style_all(c);
+        lv_obj_set_size(c, VOICE_CHIP_W, VOICE_CHIP_H);
+        lv_obj_set_pos(c, x, VOICE_CHIP_Y);
+        lv_obj_set_style_bg_color(c, lv_color_hex(color), 0);
+        lv_obj_set_style_bg_opa(c, LV_OPA_COVER, 0);
+        lv_obj_set_style_radius(c, 5, 0);
+        lv_obj_t* l = makeLabel(c, &lv_font_montserrat_16, 0xFFFFFF, label);
+        lv_obj_align(l, LV_ALIGN_CENTER, 0, 0);
+    };
+    chip(VOICE_CLEAR_X, "CLEAR", Theme::StatusRed);
+    chip(VOICE_SEND_X, "SEND", Theme::StatusGreen);
+    lv_obj_t* hint = makeLabel(s_body, &lv_font_montserrat_12, Theme::HUDFaint,
+                               "BOOT send  /  PWR clear  /  hold BOOT to add");
+    lv_obj_set_pos(hint, 16, VOICE_CHIP_Y + 10);
+}
+#endif
+
 namespace Ticker {
 
 void create() {
@@ -608,7 +698,8 @@ void create() {
 
     lv_obj_t* topRail = lv_obj_create(s_scr);
     lv_obj_remove_style_all(topRail);
-    lv_obj_set_size(topRail, 480, KEY_RAIL_H);
+    lv_obj_set_size(topRail, SCREEN_W, KEY_RAIL_H > 0 ? KEY_RAIL_H : 16);
+    if (KEY_RAIL_H == 0) lv_obj_add_flag(topRail, LV_OBJ_FLAG_HIDDEN);
     lv_obj_set_style_bg_opa(topRail, LV_OPA_TRANSP, 0);
     lv_obj_align(topRail, LV_ALIGN_TOP_LEFT, 0, 0);
     s_pinLabel = makeLabel(topRail, &font_kr_12, Theme::HUDDim, "PIN");
@@ -623,7 +714,7 @@ void create() {
 
     lv_obj_t* header = lv_obj_create(s_scr);
     lv_obj_remove_style_all(header);
-    lv_obj_set_size(header, 480, HEADER_H);
+    lv_obj_set_size(header, SCREEN_W, HEADER_H);
     lv_obj_set_style_bg_color(header, lv_color_hex(Theme::MidWater), 0);
     lv_obj_set_style_bg_opa(header, LV_OPA_COVER, 0);
     lv_obj_align(header, LV_ALIGN_TOP_LEFT, 0, HEADER_Y);
@@ -639,6 +730,10 @@ void create() {
         lv_obj_set_parent(s_waitingLabel, header);
         lv_obj_set_pos(s_waitingLabel, 250, 7);
     }
+    if (KEY_RAIL_H == 0) {
+        lv_obj_set_parent(s_pinLabel, header);
+        lv_obj_set_pos(s_pinLabel, 370, 8);
+    }
     s_hdrBattery = makeLabel(header, &lv_font_montserrat_14, Theme::HUDDim, "");
     lv_obj_align(s_hdrBattery, LV_ALIGN_RIGHT_MID, -32, 0);
     s_hdrWifi = makeLabel(header, &lv_font_montserrat_14, Theme::HUDDim, LV_SYMBOL_WIFI);
@@ -646,12 +741,13 @@ void create() {
 
     s_body = lv_obj_create(s_scr);
     lv_obj_remove_style_all(s_body);
-    lv_obj_set_size(s_body, 480, BODY_H);
+    lv_obj_set_size(s_body, SCREEN_W, BODY_H);
     lv_obj_align(s_body, LV_ALIGN_TOP_LEFT, 0, BODY_Y);
 
     lv_obj_t* bottomRail = lv_obj_create(s_scr);
     lv_obj_remove_style_all(bottomRail);
-    lv_obj_set_size(bottomRail, 480, KEY_RAIL_H);
+    lv_obj_set_size(bottomRail, SCREEN_W, KEY_RAIL_H > 0 ? KEY_RAIL_H : 16);
+    if (KEY_RAIL_H == 0) lv_obj_add_flag(bottomRail, LV_OBJ_FLAG_HIDDEN);
     lv_obj_set_style_bg_opa(bottomRail, LV_OPA_TRANSP, 0);
     lv_obj_align(bottomRail, LV_ALIGN_BOTTOM_LEFT, 0, 0);
     // Lower pair, left → right: hard power/reset, Focus/select.
@@ -757,10 +853,24 @@ void onTouch(const Input::TouchEvent& event) {
     if (event.gesture == Input::TouchGesture::HOLD) {
         // Usage page is passive (no tap targets in its body), so a hold there
         // can only mean the layout switch — never an approval or a pin.
+#if defined(BOARD_T_DISPLAY_PRO)
         if (s_page == 1 && event.y >= BODY_Y) StripLayout::request(StripLayout::PORTRAIT);
+#endif
         return;
     }
     if (event.gesture != Input::TouchGesture::TAP) return;
+#if defined(BOARD_HAS_VOICE_CAPTURE)
+    {
+        lockState();
+        const bool draft = s_draft[0] && !s_recording;
+        unlockState();
+        if (draft && event.y >= BODY_Y + VOICE_CHIP_Y && event.y < BODY_Y + VOICE_CHIP_Y + VOICE_CHIP_H) {
+            if (event.x >= VOICE_SEND_X) { voiceSend(); return; }
+            if (event.x >= VOICE_CLEAR_X && event.x < VOICE_CLEAR_X + VOICE_CHIP_W) { voiceClear(); return; }
+        }
+        if (draft && event.y >= BODY_Y) return;   // the draft owns the body
+    }
+#endif
 
     if (event.y < KEY_RAIL_H && event.x < 240) {
         if (event.x < 90) { if (s_page == 0) primaryAction(); else s_page = 0; }
@@ -770,6 +880,11 @@ void onTouch(const Input::TouchEvent& event) {
     }
     // Header tabs are direct, generously spaced targets.
     if (event.y < BODY_Y) {
+        if (KEY_RAIL_H == 0 && event.x >= 360 && event.x < 440) {
+            // The PIN label moved into the header with the rails.
+            if (s_page == 0) primaryAction(); else s_page = 0;
+            s_lastSig[0] = 0; return;
+        }
         if (event.x >= 240 && event.x < 350 && !Camera::present()) {
             s_page = 2; s_waitingFilter = true; s_sessionOffset = 0; s_lastSig[0] = 0; return;
         }
@@ -823,7 +938,7 @@ void onTouch(const Input::TouchEvent& event) {
         return;
     }
     if (s_page != 0) return;
-    if (event.y >= BODY_Y && event.y < BODY_Y + 42 && event.x < 368) { primaryAction(); return; }
+    if (event.y >= BODY_Y && event.y < BODY_Y + 42 && event.x < 368 + XS) { primaryAction(); return; }
 
     // Approval is only sent from the visible, explicit bottom action chips.
     // A stray tap or long press elsewhere can never answer a permission gate.
@@ -838,12 +953,12 @@ void onTouch(const Input::TouchEvent& event) {
     unlockState();
     if (!connected || !same || !s_visibleFocus.canAnswer || s_visibleFocus.ended || s_flashText[0] || s_pendingReply.active) return;
     const auto& f = s_visibleFocus;
-    if (f.awaiting && event.y >= BODY_Y + BODY_H - 44 && event.y < BODY_Y + BODY_H && event.x >= 372 && event.x < 468) {
+    if (f.awaiting && event.y >= BODY_Y + BODY_H - 44 && event.y < BODY_Y + BODY_H && event.x >= 372 + XS && event.x < 468 + XS) {
         sendPermissionDecision(f.requestId, true);
         s_pendingReply.begin(s_visibleRequest, millis());
         flash("sent - waiting for update");
     } else if (f.awaiting && event.y >= BODY_Y + BODY_H - 44 && event.y < BODY_Y + BODY_H &&
-               event.x >= 272 && event.x < 364) {
+               event.x >= 272 + XS && event.x < 364 + XS) {
         sendPermissionDecision(f.requestId, false);
         s_pendingReply.begin(s_visibleRequest, millis());
         flash("sent - waiting for update");
@@ -1058,6 +1173,26 @@ void update(float dt) {
         }
     }
 
+#if defined(BOARD_HAS_VOICE_CAPTURE)
+    {
+        static uint32_t lastGen = 0, lastSecond = 0;
+        lockState();
+        if (s_transcribing && now - s_transcribingSinceMs > TRANSCRIBE_TIMEOUT_MS) {
+            s_transcribing = false;
+            s_voiceGen++;
+            Companion::copy(s_flashText, "no transcript - try again");
+            s_flashUntilMs = now + 2500;
+        }
+        const uint32_t gen = s_voiceGen;
+        const uint32_t second = s_recording ? (now - s_recSinceMs) / 1000 : 0;
+        unlockState();
+        if (gen != lastGen || second != lastSecond) {
+            lastGen = gen;
+            lastSecond = second;
+            s_lastSig[0] = '\0';
+        }
+    }
+#endif
     if (strcmp(sig, s_lastSig) == 0) return;
     strncpy(s_lastSig, sig, sizeof(s_lastSig) - 1);
     s_lastSig[sizeof(s_lastSig) - 1] = '\0';
@@ -1096,9 +1231,15 @@ void update(float dt) {
         bool connectedNow = g_state.wsConnected;
         bool pairingRequired = g_state.pairingRequired;
         unlockState();
+#if defined(BOARD_HAS_VOICE_CAPTURE)
+        lockState();
+        const bool voiceView = voiceViewActive();
+        unlockState();
+        if (connectedNow && voiceView) renderVoicePage(now); else
+#endif
         if (!connectedNow) {
             ConnectionCard::render(
-                s_body, 480, BODY_H, pairingRequired ? "PAIRING REQUIRED" : "OFFLINE",
+                s_body, SCREEN_W, BODY_H, pairingRequired ? "PAIRING REQUIRED" : "OFFLINE",
                 pairingRequired ? "Connect USB to re-pair" : wifiUp ? "Searching for AgentDeck..." : "No WiFi · connect USB");
         } else if (s_page == 0) {
             s_visibleFocus = focus;
@@ -1122,6 +1263,68 @@ void onPhotoResult(bool delivered, const char* detail) {
     flash(note);
 }
 
+#if defined(BOARD_HAS_VOICE_CAPTURE)
+bool voiceTarget(char* id, size_t idLen) {
+    lockState();
+    int idx = pickFocusSession();
+    if (idx >= 0) {
+        snprintf(id, idLen, "%s", g_state.sessions[idx].id);
+        Companion::copy(s_voiceSession, g_state.sessions[idx].id);
+        Companion::copy(s_voiceProject, g_state.sessions[idx].projectName);
+    }
+    unlockState();
+    return idx >= 0;
+}
+
+void voiceRecording(bool on) {
+    lockState();
+    if (on) { s_recording = true; s_recSinceMs = millis(); }
+    else if (s_recording) { s_recording = false; s_transcribing = true; s_transcribingSinceMs = millis(); }
+    s_voiceGen++;
+    unlockState();
+}
+
+void voiceCancelled() {
+    lockState();
+    s_recording = s_transcribing = false;
+    s_voiceGen++;
+    unlockState();
+}
+
+bool voiceDraftActive() {
+    lockState();
+    const bool v = s_draft[0] && !s_recording;
+    unlockState();
+    return v;
+}
+
+void voiceSend() {
+    lockState();
+    if (s_draft[0]) { sendVoiceConfirm(true); s_draft[0] = 0; s_voiceGen++; }
+    unlockState();
+    flash("sending...");
+}
+
+void voiceClear() {
+    lockState();
+    if (s_draft[0]) { sendVoiceConfirm(false); s_draft[0] = 0; s_voiceGen++; }
+    unlockState();
+    flash("cleared");
+}
+
+void onVoiceResult(const char* text, bool pending, const char* note) {
+    lockState();
+    s_transcribing = false;
+    if (pending && text && text[0]) {
+        snprintf(s_draft, sizeof(s_draft), "%s", text);
+        Utf8::utf8TrimEnd(s_draft);
+    }
+    s_voiceGen++;
+    unlockState();
+    if (!pending && note && note[0]) flash(note);
+}
+#endif
+
 #if defined(SIM_HOST)
 const char* displayedSessionId() { return s_visibleFocus.id; }
 bool isPinned() { return s_pinId[0]; }
@@ -1129,4 +1332,4 @@ unsigned currentPage() { return s_page; }
 #endif
 }  // namespace Ticker
 
-#endif  // BOARD_T_DISPLAY_PRO
+#endif  // BOARD_FOCUS_STRIP

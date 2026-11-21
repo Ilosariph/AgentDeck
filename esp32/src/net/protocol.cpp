@@ -40,6 +40,12 @@
 #include "../audio/mic_capture.h"
 #include "../audio/speaker_playback.h"
 #endif
+#if defined(BOARD_WAVESHARE_349)
+#include "../input/touch_strip.h"
+#include "../ui/ticker/ticker_ui.h"
+#include "../audio/mic_capture.h"
+#include "../util/utf8.h"
+#endif
 #if defined(BOARD_T_DISPLAY_PRO)
 #include "../input/touch_strip.h"
 #include "../input/light_sensor.h"
@@ -1553,6 +1559,23 @@ static void sendDeviceInfo() {
         }
     }
 #endif
+#if defined(BOARD_WAVESHARE_349)
+    {
+        resp["touchReady"] = Input::touchReady();
+        resp["touchDownSamples"] = Input::touchDownSamples();
+        resp["touchGestures"] = Input::touchGestures();
+        resp["touchLastX"] = Input::touchLastX();
+        resp["touchLastY"] = Input::touchLastY();
+        // Capture only (no speaker); the utterance rides HTTP, so the
+        // transport the frame goes out on does not matter.
+        JsonArray caps = resp["capabilities"].to<JsonArray>();
+        if (Input::touchReady()) caps.add("touch");
+        if (Audio::micReady()) {
+            caps.add("audio");
+            caps.add("voice_draft");   // transcripts come back as drafts (voice_confirm)
+        }
+    }
+#endif
 #if defined(BOARD_EINK_SURFACE) && defined(BOARD_HAS_SPEAKER)
     // The e-ink surface had no capability block at all: it is display-first and
     // none of these boards had a peripheral to advertise. The RockBase
@@ -1723,6 +1746,26 @@ void parseMessage(const char* json, size_t length) {
         // The turn finished but held nothing worth reading aloud (a diff, a
         // tool-only turn). Say that rather than leaving the user waiting.
         Knob::notify("reply: nothing to read aloud");
+#endif
+#if defined(BOARD_WAVESHARE_349)
+    } else if (strcmp(type, "voice_result") == 0) {
+        // pending: the transcript is held as a draft for send/clear
+        // (voice_confirm). Otherwise the outcome of a send, or a failure —
+        // always shown: a board that shows nothing looks like a dead mic.
+        const char* text = obj["text"] | "";
+        const char* err = obj["error"] | "";
+        const bool pending = obj["pending"] | false;
+        const bool delivered = obj["delivered"] | false;
+        char note[32];
+        if (err[0]) {
+            if (!strcmp(err, "no_speech") || !strcmp(err, "empty_capture")) snprintf(note, sizeof(note), "heard nothing");
+            else snprintf(note, sizeof(note), "voice error: %.18s", err);
+        } else if (!text[0]) snprintf(note, sizeof(note), "heard nothing");
+        else if (pending) note[0] = 0;
+        else if (delivered) snprintf(note, sizeof(note), "sent to agent");
+        else snprintf(note, sizeof(note), "NOT sent: %.20s", obj["deliverReason"] | "no target");
+        Utf8::utf8TrimEnd(note);
+        Ticker::onVoiceResult(text, pending && !err[0] && text[0], note);
 #endif
 #if defined(BOARD_T_DISPLAY_PRO)
     } else if (strcmp(type, "photo_result") == 0) {

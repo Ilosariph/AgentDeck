@@ -52,4 +52,14 @@ int lightPollLux(uint32_t nowMs) {
 
 }  // namespace Input
 
-#endif  // BOARD_T_DISPLAY_PRO
+#elif defined(BOARD_WAVESHARE_349)
+
+// No light sensor: brightness follows the host display state only.
+#include "light_sensor.h"
+namespace Input {
+bool lightInit() { return false; }
+bool lightReady() { return false; }
+int lightPollLux(uint32_t) { return -1; }
+}  // namespace Input
+
+#endif  // BOARD_T_DISPLAY_PRO / BOARD_WAVESHARE_349
