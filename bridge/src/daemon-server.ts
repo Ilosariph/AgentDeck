@@ -105,6 +105,7 @@ import {
 import { answerTmuxPermission, refreshTmuxPanes, tmuxPermissionRequestId, TMUX_PERMISSION_PREFIX } from './tmux-permission.js';
 import { injectObservedSelection, injectObservedText, injectTextViaTmux, type InjectResult } from './observed-inject.js';
 import { ClaudeInbox, type InboxResult } from './claude-inbox.js';
+import { MediaWatcher, type MediaAction } from './media-mpris.js';
 import {
   setSerialCommandSink, setSerialVoiceSink, setSerialQuiesceCheck, sendSerialJson,
   serialPortConnected, serialPortCapabilities, serialPortBoard,
@@ -6972,6 +6973,14 @@ export async function startDaemon(opts: DaemonOptions): Promise<void> {
     handleSessionSettingsSocketRequest(cmd, sender, gatewayAdapter, core.wsServer);
 
   const handleDeviceCommand = (cmd: PluginCommand, sender?: WebSocket): void => {
+    if ((cmd as { type: string }).type === 'media_control') {
+      const { action, value } = cmd as unknown as { action?: unknown; value?: unknown };
+      const actions: MediaAction[] = ['toggle', 'next', 'previous', 'seek', 'seek_by', 'cycle', 'rate'];
+      if (typeof action === 'string' && actions.includes(action as MediaAction)) {
+        void mediaWatcher.control(action as MediaAction, typeof value === 'number' ? value : undefined);
+      }
+      return;
+    }
     if (cmd.type === 'device_security_restore') {
       if (ownerStopping || !deviceSecurity || !sender || !core.wsServer.isLocalProgramClient(sender) || core.wsServer.isEsp32Client(sender) || surfaceNegotiations.has(sender)) return;
       if (typeof cmd.pid === 'number' && typeof cmd.nonce === 'string' && typeof cmd.transfer === 'string') {
@@ -8245,6 +8254,37 @@ export async function startDaemon(opts: DaemonOptions): Promise<void> {
   // arrive over USB when WiFi is parked (serial-primary), and used to be
   // silently dropped by the device_info-only serial parser.
   setSerialCommandSink((c) => handleDeviceCommand(c as unknown as PluginCommand));
+
+  // ===== Now playing (MPRIS) for boards that advertise `media` =====
+  // Each board once: over USB when it is attached there, else its WiFi socket.
+  const mediaTargets = (): Array<(line: string) => void> => {
+    const out: Array<(line: string) => void> = [];
+    const serialBoards = new Set<string>();
+    for (const c of getSerialConnectionStatus()) {
+      if (!c.connected || !serialPortCapabilities(c.port).includes('media')) continue;
+      if (c.board) serialBoards.add(c.board);
+      out.push((line) => { sendSerialJson(c.port, line); });
+    }
+    for (const [key, sock] of wifiEsp32Sockets) {
+      const d = wifiEsp32Devices.get(key);
+      if (sock.readyState !== WebSocket.OPEN || !d?.capabilities?.includes('media')) continue;
+      if (d.board && serialBoards.has(d.board)) continue;
+      out.push((line) => { try { sock.send(line); } catch { /* disconnecting */ } });
+    }
+    return out;
+  };
+  let mediaTargetCount = 0;
+  const mediaWatcher = new MediaWatcher(
+    (msg) => { const line = JSON.stringify(msg); for (const send of mediaTargets()) send(line); },
+    () => {
+      const n = mediaTargets().length;
+      if (n > mediaTargetCount) mediaWatcher.resend();   // a board (re)appeared: give it the state
+      mediaTargetCount = n;
+      return n > 0;
+    },
+    log,
+  );
+  mediaWatcher.start();
 
   // ===== Client connect =====
   core.wsServer.onClientConnect((ws) => {

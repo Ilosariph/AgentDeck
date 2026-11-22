@@ -104,6 +104,7 @@ const char* last() { return Net::lastCommand; }
 #if defined(BOARD_T_EMBED) || defined(BOARD_FOCUS_STRIP)
 #include "net/ws_client.h"
 #include "input/power_monitor.h"
+#include "input/touch_strip.h"
 namespace Net {
 bool wsConnected() { return true; }
 }  // namespace Net
@@ -117,6 +118,7 @@ PowerStatus powerStatus() {
   s.charging = true;
   return s;
 }
+bool touchActive(int16_t*, int16_t*, int16_t*, int16_t*) { return false; }
 }  // namespace Input
 #endif
 

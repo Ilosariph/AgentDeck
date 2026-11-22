@@ -8,6 +8,7 @@
 
 #include "../../input/touch_strip.h"
 #include <stddef.h>
+#include <stdint.h>
 
 namespace Ticker {
 
@@ -40,6 +41,11 @@ void voiceClear();
 /** voice_result from the daemon (network task): `pending` = a draft held for
  *  send/clear; otherwise `note` is the outcome to flash. */
 void onVoiceResult(const char* text, bool pending, const char* note);
+#endif
+#if defined(BOARD_HAS_MEDIA_PAGE)
+/** media_state from the daemon (network task): the host's MPRIS player. */
+void onMediaState(const char* player, const char* status, const char* title, const char* artist,
+                  uint32_t posMs, uint32_t lenMs, float rate, bool canRate, uint8_t players);
 #endif
 #if defined(SIM_HOST)
 const char* displayedSessionId();

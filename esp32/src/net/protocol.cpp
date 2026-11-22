@@ -42,6 +42,7 @@
 #endif
 #if defined(BOARD_WAVESHARE_349)
 #include "../input/touch_strip.h"
+#include "../input/power_monitor.h"
 #include "../ui/ticker/ticker_ui.h"
 #include "../audio/mic_capture.h"
 #include "../util/utf8.h"
@@ -1574,6 +1575,15 @@ static void sendDeviceInfo() {
             caps.add("audio");
             caps.add("voice_draft");   // transcripts come back as drafts (voice_confirm)
         }
+        caps.add("media");   // MEDIA page: media_state in, media_control out
+        Input::PowerStatus ps = Input::powerStatus();
+        if (ps.valid) {
+            caps.add("battery");
+            resp["batteryPercent"] = ps.soc;
+            resp["batteryVoltageMv"] = ps.voltageMv;
+            resp["batteryCharging"] = ps.charging;
+            resp["usbPowered"] = ps.usbPowered;
+        }
     }
 #endif
 #if defined(BOARD_EINK_SURFACE) && defined(BOARD_HAS_SPEAKER)
@@ -1766,6 +1776,10 @@ void parseMessage(const char* json, size_t length) {
         else snprintf(note, sizeof(note), "NOT sent: %.20s", obj["deliverReason"] | "no target");
         Utf8::utf8TrimEnd(note);
         Ticker::onVoiceResult(text, pending && !err[0] && text[0], note);
+    } else if (strcmp(type, "media_state") == 0) {
+        Ticker::onMediaState(obj["player"] | "", obj["status"] | "none", obj["title"] | "",
+                             obj["artist"] | "", obj["positionMs"] | 0u, obj["lengthMs"] | 0u,
+                             obj["rate"] | 1.0f, obj["canRate"] | false, obj["players"] | 0);
 #endif
 #if defined(BOARD_T_DISPLAY_PRO)
     } else if (strcmp(type, "photo_result") == 0) {

@@ -1217,7 +1217,7 @@ export function handleSerialLine(conn: SerialConnection, line: string): void {
         if (reply) sendEventToBoard(conn, reply);
       } else if (['select_option', 'session_command', 'permission_decision',
                   'peripheral_event', 'focus_session',
-                  'review_run'].includes(msg.type as string)) {
+                  'review_run', 'media_control'].includes(msg.type as string)) {
         // Device→daemon command channel over serial (the gap that dropped a
         // serial-attached board's steering taps). Forward into the same
         // command pipeline the WS path uses.

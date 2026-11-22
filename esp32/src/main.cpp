@@ -58,6 +58,9 @@
 #include "input/power_monitor.h"
 #include "audio/mic_capture.h"
 #include "drivers/waveshare_349.h"
+#include "net/ws_client.h"
+#include <esp_sleep.h>
+#include <driver/rtc_io.h>
 #elif defined(BOARD_T_DISPLAY_PRO)
 #include "ui/display.h"
 #include "ui/ticker/ticker_ui.h"
@@ -417,7 +420,29 @@ static void networkTask(void* param) {
 //   BOOT  tap: pin/unpin the focus (or send the voice draft)
 //         hold: push-to-talk to the pinned/focused session
 //   PWR   tap: next page (or clear the voice draft)
-//         hold 2 s: power off (battery only; USB keeps the board on)
+//         hold 1 s, release: deep sleep (PWR wakes it)
+//         hold 4 s: power off (battery only; USB keeps the board on)
+// On battery the strip also deep-sleeps after IDLE_SLEEP_MS without a touch
+// or a button.
+static void stripDeepSleep(const char* why) {
+    Serial.printf("[Power] deep sleep (%s), PWR wakes\n", why);
+    Serial.flush();
+    UI::setBrightness(0);          // EXIO1 low: the expander keeps it through sleep
+    UI::panelSleep();
+    ledcDetach(BOARD_PIN_BL);      // PWM off, pin high (dark, active low) and held
+    pinMode(BOARD_PIN_BL, OUTPUT);
+    digitalWrite(BOARD_PIN_BL, HIGH);
+    gpio_hold_en((gpio_num_t)BOARD_PIN_BL);
+    gpio_deep_sleep_hold_en();
+    // ext0 is level-triggered: a held button would wake the board at once.
+    while (digitalRead(BOARD_PIN_BTN_PWR) == LOW) delay(10);
+    delay(50);
+    rtc_gpio_pullup_en((gpio_num_t)BOARD_PIN_BTN_PWR);
+    rtc_gpio_pulldown_dis((gpio_num_t)BOARD_PIN_BTN_PWR);
+    esp_sleep_enable_ext0_wakeup((gpio_num_t)BOARD_PIN_BTN_PWR, 0);
+    esp_deep_sleep_start();
+}
+
 static void stripApplyBrightness() {
     static int lastApplied = -1;
     lockState();
@@ -444,9 +469,13 @@ static void uiTask(void* param) {
 
     pinMode(BOARD_PIN_BTN_BOOT, INPUT_PULLUP);
     pinMode(BOARD_PIN_BTN_PWR, INPUT_PULLUP);
-    constexpr uint32_t TALK_HOLD_MS = 400, OFF_HOLD_MS = 2000, MIN_TALK_MS = 300;
-    bool bootDown = false, bootTalking = false, pwrDown = false, pwrFired = false;
+    constexpr uint32_t TALK_HOLD_MS = 400, SLEEP_HOLD_MS = 1000, OFF_HOLD_MS = 4000, MIN_TALK_MS = 300;
+    constexpr uint32_t IDLE_SLEEP_MS = 10 * 60 * 1000;
+    bool bootDown = false, bootTalking = false, pwrDown = false, pwrFired = false, pwrSleep = false;
     uint32_t bootSince = 0, pwrSince = 0, talkSince = 0;
+    // The press that woke the board from deep sleep is not a tap.
+    if (digitalRead(BOARD_PIN_BTN_PWR) == LOW) { pwrDown = true; pwrFired = true; }
+    uint32_t lastActivityMs = millis();
 
     uint32_t lastFrameMs = millis();
     while (true) {
@@ -457,8 +486,11 @@ static void uiTask(void* param) {
         if (dt > 0.1f) dt = 0.1f;
         if (dt_ms > 0) lv_tick_inc(dt_ms);
 
+        Input::powerPoll(now);
+
         // BOOT: a hold talks, a tap acts on release.
         const bool boot = digitalRead(BOARD_PIN_BTN_BOOT) == LOW;
+        if (boot) lastActivityMs = now;
         if (boot && !bootDown) { bootDown = true; bootSince = now; }
         if (boot && bootDown && !bootTalking && now - bootSince >= TALK_HOLD_MS && Audio::micReady()) {
             char sid[32] = {0};
@@ -489,16 +521,23 @@ static void uiTask(void* param) {
             }
         }
 
-        // PWR: a tap acts on release, a long hold powers off.
+        // PWR: a tap acts on release, a 1 s hold sleeps on release, a long
+        // hold powers off.
         const bool pwr = digitalRead(BOARD_PIN_BTN_PWR) == LOW;
-        if (pwr && !pwrDown) { pwrDown = true; pwrFired = false; pwrSince = now; }
-        if (pwr && pwrDown && !pwrFired && now - pwrSince >= OFF_HOLD_MS) {
+        if (pwr) lastActivityMs = now;
+        if (pwr && !pwrDown) { pwrDown = true; pwrFired = false; pwrSleep = false; pwrSince = now; }
+        if (pwr && pwrDown && !pwrFired && !pwrSleep && now - pwrSince >= SLEEP_HOLD_MS) {
+            pwrSleep = true;
+            Ticker::notify("release to sleep");
+        }
+        if (pwr && pwrDown && !pwrFired && now - pwrSince >= OFF_HOLD_MS && !Input::powerStatus().usbPowered) {
             pwrFired = true;
             Ticker::notify("power off");
             Input::powerOff();
         }
         if (!pwr && pwrDown) {
             pwrDown = false;
+            if (!pwrFired && pwrSleep) stripDeepSleep("PWR");
             if (!pwrFired && now - pwrSince >= 30) {
                 if (Ticker::voiceDraftActive()) Ticker::voiceClear();
                 else Ticker::nextPage();
@@ -511,6 +550,16 @@ static void uiTask(void* param) {
 
         Input::TouchEvent touch = Input::touchPoll(now);
         if (touch.gesture != Input::TouchGesture::NONE) Ticker::onTouch(touch);
+        if (touch.gesture != Input::TouchGesture::NONE || Input::touchActive(nullptr, nullptr, nullptr, nullptr))
+            lastActivityMs = now;
+
+        {
+            // Battery only: on USB the strip is a desk fixture and stays up.
+            const Input::PowerStatus ps = Input::powerStatus();
+            if (ps.valid && !ps.usbPowered && now - lastActivityMs >= IDLE_SLEEP_MS &&
+                !Audio::micCapturing() && !Net::voiceUploadBusy())
+                stripDeepSleep("idle on battery");
+        }
 
         stripApplyBrightness();
         Ticker::update(dt);

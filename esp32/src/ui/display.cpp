@@ -1690,6 +1690,10 @@ static void tdisplayProSetBacklightLevel(uint8_t value) {
 }
 #endif
 
+#if defined(BOARD_WAVESHARE_349)
+void panelSleep() { s_panel.sleep(); }
+#endif
+
 void setBrightness(int level) {
     if (level < 0) level = 0;
     if (level > 255) level = 255;

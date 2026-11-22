@@ -7,12 +7,17 @@
 
 namespace Input {
 
-enum class TouchGesture : uint8_t { NONE = 0, TAP, HOLD, SWIPE_LEFT, SWIPE_RIGHT };
+// RELEASE: the finger lifted after a hold or a slow drag (nothing else fired),
+// so a drag consumer (the media timeline) always learns where it ended.
+enum class TouchGesture : uint8_t { NONE = 0, TAP, HOLD, SWIPE_LEFT, SWIPE_RIGHT, RELEASE };
 
 struct TouchEvent {
     TouchGesture gesture;
     int16_t x;
     int16_t y;
+    // Where the finger went down (release gestures; 0 for HOLD/NONE).
+    int16_t startX;
+    int16_t startY;
 };
 
 bool touchInit();
@@ -23,6 +28,9 @@ uint8_t touchAddress();
 uint8_t touchI2cDeviceCount();
 bool touchRtcSeen();
 TouchEvent touchPoll(uint32_t nowMs);
+/** Live drag state from the last touchPoll: true while a finger is down, with
+ *  its landscape position and where it went down. */
+bool touchActive(int16_t* x, int16_t* y, int16_t* startX, int16_t* startY);
 
 /**
  * Pocket (portrait) mode: the CST226SE's native portrait report matches the

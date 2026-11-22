@@ -267,15 +267,54 @@ void powerOff() {
 
 #elif defined(BOARD_WAVESHARE_349)
 
-// No fuel gauge on the Waveshare 3.49: the strip hides its battery cluster.
+// No fuel gauge on the Waveshare 3.49: the cell voltage comes from GPIO4
+// behind a 1:3 divider (Waveshare 01_ADC_Test). No charger status pin either:
+// USB power is read off the USB-Serial/JTAG link (host SOF frames), and
+// "charging" means USB present while the cell is still below full.
 #include "power_monitor.h"
 #include "../drivers/waveshare_349.h"
+#include <Arduino.h>
 
 namespace Input {
-void powerInit() {}
+static PowerStatus s_status{};
+static uint32_t s_lastPollMs = 0;
+static float s_filteredMv = 0;
+
+// Resting Li-ion voltage → state of charge (load is light and steady).
+static uint8_t socFromMv(uint16_t mv) {
+    static const uint16_t kMv[] = {3300, 3500, 3600, 3700, 3750, 3800, 3850, 3900, 4000, 4100, 4180};
+    static const uint8_t kPct[] = {0, 5, 10, 20, 30, 40, 50, 60, 75, 90, 100};
+    if (mv <= kMv[0]) return 0;
+    for (size_t i = 1; i < sizeof(kMv) / sizeof(kMv[0]); ++i)
+        if (mv < kMv[i]) return kPct[i - 1] + (uint32_t)(kPct[i] - kPct[i - 1]) * (mv - kMv[i - 1]) / (kMv[i] - kMv[i - 1]);
+    return 100;
+}
+
+static void sample() {
+    uint32_t sum = 0;
+    for (int i = 0; i < 8; ++i) sum += analogReadMilliVolts(BOARD_PIN_BAT_ADC);
+    const float mv = sum / 8.0f * 3.0f;
+    s_filteredMv = s_filteredMv <= 0 ? mv : s_filteredMv * 0.8f + mv * 0.2f;
+    const uint16_t v = (uint16_t)s_filteredMv;
+    // Below ~2.5 V there is no cell (or the divider is not fitted).
+    s_status.valid = v > 2500;
+    s_status.voltageMv = v;
+    s_status.soc = socFromMv(v);
+    s_status.usbPowered = Serial.isPlugged();
+    s_status.charging = s_status.usbPowered && v < 4150;
+}
+
+void powerInit() {
+    analogSetPinAttenuation(BOARD_PIN_BAT_ADC, ADC_11db);
+    sample();
+}
 void i2cScanLog(const char*) {}
-void powerPoll(uint32_t) {}
-PowerStatus powerStatus() { return PowerStatus{}; }
+void powerPoll(uint32_t nowMs) {
+    if (nowMs - s_lastPollMs < 2000) return;
+    s_lastPollMs = nowMs;
+    sample();
+}
+PowerStatus powerStatus() { return s_status; }
 void powerOff() { Ws349::exio(Ws349::EXIO_BAT_HOLD, false); }
 }  // namespace Input
 

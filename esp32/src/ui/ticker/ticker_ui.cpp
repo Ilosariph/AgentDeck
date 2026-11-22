@@ -33,7 +33,14 @@
 // probed at boot — 3 CAM (show-and-tell capture; the no-camera unit runs this
 // same binary and never grows the page).
 static constexpr uint8_t PAGE_CAM = 3;
+#if defined(BOARD_HAS_MEDIA_PAGE)
+// MEDIA follows the others (after CAM when present).
+static uint8_t pageMedia() { return Camera::present() ? 4 : 3; }
+static uint8_t pageCount() { return pageMedia() + 1; }
+#else
+static uint8_t pageMedia() { return 0xFF; }
 static uint8_t pageCount() { return Camera::present() ? 4 : 3; }
+#endif
 // In landscape the two short physical button pairs sit against the long
 // top/bottom edges near the right end. From left to right the upper pair is
 // previous/next (GPIO12/16); the lower pair is power-reset/Focus (RST/GPIO0).
@@ -60,6 +67,8 @@ static constexpr int BODY_H = SCREEN_H - BODY_Y - KEY_RAIL_H;
 // The strip rests on the session board: every session at once, readable by
 // colour from across the desk. Focus, usage and camera are one tap away.
 static uint8_t s_page = 2;
+// Index 3 is MEDIA on a board without the camera shield.
+static bool onCamPage() { return s_page == PAGE_CAM && Camera::present(); }
 static char s_pinId[32]{};
 static char s_pinnedResult[100]{}, s_pinnedResultHm[6]{};
 static bool s_capturePin = false, s_newResult = false;
@@ -76,7 +85,7 @@ static lv_obj_t *s_pinLabel, *s_waitingLabel;
 static char s_waitingText[24]{};
 
 static lv_obj_t* s_scr = nullptr;
-static lv_obj_t* s_tabs[4] = {nullptr, nullptr, nullptr, nullptr};
+static lv_obj_t* s_tabs[5] = {nullptr, nullptr, nullptr, nullptr, nullptr};
 static lv_obj_t* s_hdrWifi = nullptr;
 static lv_obj_t* s_hdrBattery = nullptr;
 static lv_obj_t* s_body = nullptr;
@@ -246,7 +255,7 @@ static void updateKeyHints(uint32_t now) {
     // changing page/button feedback does not allocate inside the render loop.
     // Short names for the rocker capsules; computed from the cyclic page order
     // so the CAM page slots in only when the camera is present.
-    static const char* const shortNames[4] = {"FOCUS", "USAGE", "SESS", "CAM"};
+    static const char* const shortNames[5] = {"FOCUS", "USAGE", "SESS", "CAM", "MEDIA"};
     static uint8_t lastPage = 0xFF;
     static bool lastPin = false;
     if (lastPage != s_page || lastPin != bool(s_pinId[0])) {
@@ -256,7 +265,7 @@ static void updateKeyHints(uint32_t now) {
         lv_label_set_text_static(s_hintPrev, shortNames[(s_page + n - 1) % n]);
         lv_label_set_text_static(s_hintNext, shortNames[(s_page + 1) % n]);
         // The lower-right capsule doubles as the shutter on the CAM page.
-        lv_label_set_text_static(s_hintPrimary, s_page == PAGE_CAM ? "SNAP" : s_page == 0 ? (s_pinId[0] ? "UNPIN" : "PIN") : "FOCUS");
+        lv_label_set_text_static(s_hintPrimary, onCamPage() ? "SNAP" : s_page == 0 ? (s_pinId[0] ? "UNPIN" : "PIN") : "FOCUS");
     }
 
     static bool lastActive[3] = {false, false, false};
@@ -689,7 +698,263 @@ static void renderVoicePage(uint32_t now) {
 }
 #endif
 
+#if defined(BOARD_HAS_MEDIA_PAGE)
+// ── MEDIA page ───────────────────────────────────────────────────────────────
+// The daemon sends media_state when the player, track, status or speed
+// changes, or after a seek; the board advances the position in between.
+// Written by the network task, read by the UI task: under the state lock.
+struct MediaState {
+    char player[24];
+    char status[8];      // playing / paused / stopped / none
+    char title[121];
+    char artist[81];
+    uint32_t posMs, lenMs, atMs;
+    float rate;
+    bool canRate;
+    uint8_t players;
+};
+static MediaState s_media{{0}, "none", {0}, {0}, 0, 0, 0, 1.0f, false, 0};
+static uint32_t s_mediaGen = 0;
+// Live widgets (children of s_body; reset on every body clean).
+static lv_obj_t *s_mFill = nullptr, *s_mKnob = nullptr, *s_mElapsed = nullptr, *s_mRemain = nullptr;
+
+static constexpr int M_BAR_X = 16, M_BAR_W = SCREEN_W - 32, M_BAR_Y = 70, M_BAR_H = 8;
+static constexpr int M_SCRUB_Y0 = M_BAR_Y - 16, M_SCRUB_Y1 = M_BAR_Y + 26;   // body coords
+static constexpr int M_CHIP_Y = BODY_H - 4 - 34, M_CHIP_H = 34;
+static constexpr int M_CHIP_W = 64, M_CHIP_GAP = 6;
+// Transport chips from the left; speed group (- / rate / +) from the right.
+enum MediaChip : uint8_t { MC_BACK = 0, MC_PREV, MC_TOGGLE, MC_NEXT, MC_FWD, MC_SLOWER, MC_RATE, MC_FASTER, MC_COUNT };
+static void mediaChipRect(uint8_t i, int* x, int* w) {
+    if (i <= MC_FWD) { *x = 16 + i * (M_CHIP_W + M_CHIP_GAP); *w = M_CHIP_W; return; }
+    static constexpr int SW = 48, RW = 80;
+    const int x0 = SCREEN_W - 16 - (SW + M_CHIP_GAP + RW + M_CHIP_GAP + SW);
+    if (i == MC_SLOWER) { *x = x0; *w = SW; }
+    else if (i == MC_RATE) { *x = x0 + SW + M_CHIP_GAP; *w = RW; }
+    else { *x = x0 + SW + M_CHIP_GAP + RW + M_CHIP_GAP; *w = SW; }
+}
+
+static void sendMediaControl(const char* action, long value = 0) {
+    char buf[96];
+    snprintf(buf, sizeof(buf), "{\"type\":\"media_control\",\"action\":\"%s\",\"value\":%ld}", action, value);
+    Net::queueOutbound(buf);
+}
+
+/** Position the board shows now (caller holds the state lock). */
+static uint32_t mediaPositionNow(uint32_t now) {
+    uint64_t pos = s_media.posMs;
+    if (!strcmp(s_media.status, "playing")) pos += (uint64_t)((now - s_media.atMs) * s_media.rate);
+    if (s_media.lenMs && pos > s_media.lenMs) pos = s_media.lenMs;
+    return (uint32_t)pos;
+}
+
+static uint32_t mediaXToMs(int x, uint32_t lenMs) {
+    if (x < M_BAR_X) x = M_BAR_X;
+    if (x > M_BAR_X + M_BAR_W) x = M_BAR_X + M_BAR_W;
+    return (uint32_t)((uint64_t)lenMs * (x - M_BAR_X) / M_BAR_W);
+}
+
+static void formatMediaTime(char* out, size_t n, uint32_t ms) {
+    uint32_t s = ms / 1000;
+    if (s >= 3600) snprintf(out, n, "%lu:%02lu:%02lu", (unsigned long)(s / 3600), (unsigned long)(s / 60 % 60), (unsigned long)(s % 60));
+    else snprintf(out, n, "%lu:%02lu", (unsigned long)(s / 60), (unsigned long)(s % 60));
+}
+
+static bool mediaScrubbing(int16_t* x) {
+    int16_t cx, cy, sx, sy;
+    if (!Input::touchActive(&cx, &cy, &sx, &sy)) return false;
+    if (sy < BODY_Y + M_SCRUB_Y0 || sy >= BODY_Y + M_SCRUB_Y1) return false;
+    *x = cx;
+    return true;
+}
+
+// Moves the knob/fill and the time labels; cheap, runs every frame on MEDIA.
+static void updateMediaLive(uint32_t now) {
+    if (!s_mFill || !s_mKnob || !s_mElapsed || !s_mRemain) return;
+    lockState();
+    const uint32_t len = s_media.lenMs;
+    uint32_t pos = mediaPositionNow(now);
+    unlockState();
+    int16_t dragX;
+    const bool dragging = len && mediaScrubbing(&dragX);
+    if (dragging) pos = mediaXToMs(dragX, len);
+    const int fill = len ? (int)((uint64_t)M_BAR_W * pos / len) : 0;
+    static int lastFill = -1;
+    static uint32_t lastSec = UINT32_MAX;
+    static bool lastDragging = false;
+    if (fill != lastFill || lv_obj_get_width(s_mFill) != (fill > 0 ? fill : 1)) {
+        lastFill = fill;
+        lv_obj_set_width(s_mFill, fill > 0 ? fill : 1);
+        lv_obj_set_x(s_mKnob, M_BAR_X + fill - 7);
+    }
+    if (pos / 1000 != lastSec || dragging != lastDragging || !lv_label_get_text(s_mElapsed)[0]) {
+        lastSec = pos / 1000;
+        lastDragging = dragging;
+        char a[16], b[24], l[16];
+        formatMediaTime(a, sizeof(a), pos);
+        lv_label_set_text(s_mElapsed, a);
+        lv_obj_set_style_text_color(s_mElapsed, lv_color_hex(dragging ? Theme::StatusCyan : Theme::HUDText), 0);
+        if (len) {
+            formatMediaTime(l, sizeof(l), len);
+            char rem[16];
+            formatMediaTime(rem, sizeof(rem), len - (pos < len ? pos : len));
+            snprintf(b, sizeof(b), "-%s / %s", rem, l);
+        } else snprintf(b, sizeof(b), "live");
+        lv_label_set_text(s_mRemain, b);
+    }
+}
+
+static void renderMediaPage() {
+    MediaState m;
+    lockState();
+    m = s_media;
+    unlockState();
+    Utf8::sanitizeLvglText(m.title);
+    Utf8::sanitizeLvglText(m.artist);
+    Utf8::sanitizeLvglText(m.player);
+    const bool none = !strcmp(m.status, "none");
+    const bool playing = !strcmp(m.status, "playing");
+
+    char head[64];
+    if (none) snprintf(head, sizeof(head), "NO PLAYER");
+    else snprintf(head, sizeof(head), "%s  %s%s", m.player,
+                  playing ? "PLAYING" : !strcmp(m.status, "paused") ? "PAUSED" : "STOPPED",
+                  m.players > 1 ? "   (tap to switch)" : "");
+    for (char* c = head; *c && c < head + 24; ++c) if (*c >= 'a' && *c <= 'z') *c -= 32;   // player name upper-case
+    lv_obj_t* h = makeLabel(s_body, &font_kr_12, playing ? Theme::StatusGreen : Theme::HUDDim, head);
+    lv_obj_set_pos(h, 16, 4);
+
+    lv_obj_t* t = makeLabel(s_body, &font_kr_16, Theme::HUDText,
+                            none ? "Nothing playing" : m.title[0] ? m.title : "(untitled)");
+    lv_obj_set_pos(t, 16, 20);
+    lv_obj_set_width(t, SCREEN_W - 32);
+    lv_label_set_long_mode(t, LV_LABEL_LONG_DOT);
+    lv_obj_t* a = makeLabel(s_body, &font_kr_12, Theme::HUDDim,
+                            none ? "Firefox, Plezy, mpv... (MPRIS on the host)" : m.artist);
+    lv_obj_set_pos(a, 16, 44);
+    lv_obj_set_width(a, SCREEN_W - 32);
+    lv_label_set_long_mode(a, LV_LABEL_LONG_DOT);
+    if (none) return;
+
+    lv_obj_t* track = lv_obj_create(s_body);
+    lv_obj_remove_style_all(track);
+    lv_obj_set_size(track, M_BAR_W, M_BAR_H);
+    lv_obj_set_pos(track, M_BAR_X, M_BAR_Y);
+    lv_obj_set_style_bg_color(track, lv_color_hex(Theme::MidWater), 0);
+    lv_obj_set_style_bg_opa(track, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(track, M_BAR_H / 2, 0);
+    s_mFill = lv_obj_create(s_body);
+    lv_obj_remove_style_all(s_mFill);
+    lv_obj_set_size(s_mFill, 1, M_BAR_H);
+    lv_obj_set_pos(s_mFill, M_BAR_X, M_BAR_Y);
+    lv_obj_set_style_bg_color(s_mFill, lv_color_hex(Theme::StatusCyan), 0);
+    lv_obj_set_style_bg_opa(s_mFill, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(s_mFill, M_BAR_H / 2, 0);
+    s_mKnob = lv_obj_create(s_body);
+    lv_obj_remove_style_all(s_mKnob);
+    lv_obj_set_size(s_mKnob, 14, 14);
+    lv_obj_set_pos(s_mKnob, M_BAR_X - 7, M_BAR_Y + M_BAR_H / 2 - 7);
+    lv_obj_set_style_bg_color(s_mKnob, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_bg_opa(s_mKnob, m.lenMs ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
+    lv_obj_set_style_radius(s_mKnob, LV_RADIUS_CIRCLE, 0);
+    s_mElapsed = makeLabel(s_body, &lv_font_montserrat_12, Theme::HUDText, "");
+    lv_obj_set_pos(s_mElapsed, M_BAR_X, M_BAR_Y + 12);
+    s_mRemain = makeLabel(s_body, &lv_font_montserrat_12, Theme::HUDDim, "");
+    lv_obj_set_width(s_mRemain, 200);
+    lv_obj_set_style_text_align(s_mRemain, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_set_pos(s_mRemain, M_BAR_X + M_BAR_W - 200, M_BAR_Y + 12);
+
+    char rate[12];
+    snprintf(rate, sizeof(rate), "%.2fx", m.rate);
+    const char* labels[MC_COUNT] = {"-10s", LV_SYMBOL_PREV, playing ? LV_SYMBOL_PAUSE : LV_SYMBOL_PLAY,
+                                    LV_SYMBOL_NEXT, "+10s", LV_SYMBOL_MINUS, rate, LV_SYMBOL_PLUS};
+    for (uint8_t i = 0; i < MC_COUNT; ++i) {
+        int x, w;
+        mediaChipRect(i, &x, &w);
+        const bool speed = i >= MC_SLOWER;
+        const bool enabled = !speed || m.canRate;
+        uint32_t bg = i == MC_TOGGLE ? Theme::StatusCyan : Theme::MidWater;
+        if (i == MC_RATE && m.canRate && (m.rate < 0.99f || m.rate > 1.01f)) bg = Theme::StatusAmber;
+        lv_obj_t* c = lv_obj_create(s_body);
+        lv_obj_remove_style_all(c);
+        lv_obj_set_size(c, w, M_CHIP_H);
+        lv_obj_set_pos(c, x, M_CHIP_Y);
+        lv_obj_set_style_bg_color(c, lv_color_hex(bg), 0);
+        lv_obj_set_style_bg_opa(c, enabled ? LV_OPA_COVER : LV_OPA_40, 0);
+        lv_obj_set_style_radius(c, 5, 0);
+        lv_obj_t* l = makeLabel(c, &lv_font_montserrat_16, enabled ? 0xFFFFFF : Theme::HUDFaint, labels[i]);
+        lv_obj_align(l, LV_ALIGN_CENTER, 0, 0);
+    }
+    updateMediaLive(millis());
+}
+
+/** Touch on MEDIA. True when consumed (incl. swipes that started on the timeline). */
+static bool mediaTouch(const Input::TouchEvent& e) {
+    const int sy = e.startY - BODY_Y;
+    if (e.startY >= BODY_Y && sy >= M_SCRUB_Y0 && sy < M_SCRUB_Y1) {
+        if (e.gesture == Input::TouchGesture::HOLD) return true;   // still dragging
+        lockState();
+        const uint32_t len = s_media.lenMs;
+        const bool none = !strcmp(s_media.status, "none");
+        uint32_t target = mediaXToMs(e.x, len);
+        if (len && !none) { s_media.posMs = target; s_media.atMs = millis(); }
+        unlockState();
+        if (none) return true;
+        if (!len) { flash("not seekable"); return true; }
+        sendMediaControl("seek", (long)target);
+        return true;
+    }
+    if (e.gesture != Input::TouchGesture::TAP) return false;
+    const int y = e.y - BODY_Y;
+    if (y >= 0 && y < 40) {                              // header: switch player
+        sendMediaControl("cycle");
+        return true;
+    }
+    if (y < M_CHIP_Y - 4 || y >= M_CHIP_Y + M_CHIP_H + 4) return true;
+    lockState();
+    const bool canRate = s_media.canRate;
+    unlockState();
+    for (uint8_t i = 0; i < MC_COUNT; ++i) {
+        int x, w;
+        mediaChipRect(i, &x, &w);
+        if (e.x < x - 3 || e.x >= x + w + 3) continue;
+        switch (i) {
+            case MC_BACK: sendMediaControl("seek_by", -10000); break;
+            case MC_FWD: sendMediaControl("seek_by", 10000); break;
+            case MC_PREV: sendMediaControl("previous"); break;
+            case MC_NEXT: sendMediaControl("next"); break;
+            case MC_TOGGLE: sendMediaControl("toggle"); break;
+            case MC_SLOWER: if (canRate) sendMediaControl("rate", -1); else flash("speed fixed by player"); break;
+            case MC_FASTER: if (canRate) sendMediaControl("rate", 1); else flash("speed fixed by player"); break;
+            case MC_RATE: if (canRate) sendMediaControl("rate", 0); else flash("speed fixed by player"); break;
+        }
+        break;
+    }
+    return true;
+}
+#endif
+
 namespace Ticker {
+
+#if defined(BOARD_HAS_MEDIA_PAGE)
+void onMediaState(const char* player, const char* status, const char* title, const char* artist,
+                  uint32_t posMs, uint32_t lenMs, float rate, bool canRate, uint8_t players) {
+    lockState();
+    snprintf(s_media.player, sizeof(s_media.player), "%s", player ? player : "");
+    snprintf(s_media.status, sizeof(s_media.status), "%s", status ? status : "none");
+    snprintf(s_media.title, sizeof(s_media.title), "%s", title ? title : "");
+    snprintf(s_media.artist, sizeof(s_media.artist), "%s", artist ? artist : "");
+    Utf8::utf8TrimEnd(s_media.title);
+    Utf8::utf8TrimEnd(s_media.artist);
+    s_media.posMs = posMs;
+    s_media.lenMs = lenMs;
+    s_media.atMs = millis();
+    s_media.rate = rate > 0.01f ? rate : 1.0f;
+    s_media.canRate = canRate;
+    s_media.players = players;
+    s_mediaGen++;
+    unlockState();
+}
+#endif
 
 void create() {
     s_scr = lv_obj_create(NULL);
@@ -726,6 +991,10 @@ void create() {
         s_tabs[i] = makeLabel(header, &lv_font_montserrat_14, Theme::HUDDim, tabNames[i]);
         lv_obj_set_pos(s_tabs[i], tabX[i], 7);
     }
+#if defined(BOARD_HAS_MEDIA_PAGE)
+    s_tabs[pageMedia()] = makeLabel(header, &lv_font_montserrat_14, Theme::HUDDim, "MEDIA");
+    lv_obj_set_pos(s_tabs[pageMedia()], 460, 7);
+#endif
     if (!Camera::present()) {
         lv_obj_set_parent(s_waitingLabel, header);
         lv_obj_set_pos(s_waitingLabel, 250, 7);
@@ -811,7 +1080,13 @@ static void snapPhoto() {
 }
 
 void primaryAction() {
-    if (s_page == PAGE_CAM) {
+#if defined(BOARD_HAS_MEDIA_PAGE)
+    if (s_page == pageMedia()) {   // BOOT tap on MEDIA: play/pause
+        sendMediaControl("toggle");
+        return;
+    }
+#endif
+    if (onCamPage()) {
         snapPhoto();
         return;
     }
@@ -842,6 +1117,19 @@ void buttonFeedback(uint8_t button) {
 
 void onTouch(const Input::TouchEvent& event) {
     if (event.gesture == Input::TouchGesture::NONE) return;
+#if defined(BOARD_HAS_MEDIA_PAGE)
+    if (s_page == pageMedia() && event.y >= BODY_Y && event.startY >= BODY_Y) {
+        lockState();
+        const bool connected = g_state.wsConnected;
+#if defined(BOARD_HAS_VOICE_CAPTURE)
+        const bool voice = voiceViewActive();
+#else
+        const bool voice = false;
+#endif
+        unlockState();
+        if (connected && !voice && mediaTouch(event)) return;
+    }
+#endif
     if (event.gesture == Input::TouchGesture::SWIPE_LEFT) {
         nextPage();
         return;
@@ -880,6 +1168,9 @@ void onTouch(const Input::TouchEvent& event) {
     }
     // Header tabs are direct, generously spaced targets.
     if (event.y < BODY_Y) {
+#if defined(BOARD_HAS_MEDIA_PAGE)
+        if (event.x >= 450 && event.x < 540) { s_page = pageMedia(); return; }
+#endif
         if (KEY_RAIL_H == 0 && event.x >= 360 && event.x < 440) {
             // The PIN label moved into the header with the rails.
             if (s_page == 0) primaryAction(); else s_page = 0;
@@ -895,7 +1186,7 @@ void onTouch(const Input::TouchEvent& event) {
         return;
     }
 
-    if (s_page == PAGE_CAM) {
+    if (onCamPage()) {
         // Explicit chips only, mirroring the Focus-page approval rule: a stray
         // tap on the viewfinder never fires the shutter.
         if (event.y >= BODY_Y + BODY_H - 44 && event.x >= 262 && event.x < 362) {
@@ -977,7 +1268,7 @@ void update(float dt) {
     {
         static bool wasCamPage = false;
         static uint32_t lastReacquireMs = 0;
-        bool isCamPage = (s_page == PAGE_CAM);
+        bool isCamPage = (onCamPage());
         if (isCamPage && !wasCamPage) {
             if (!Camera::acquire()) flash("camera power failed");
         } else if (!isCamPage && wasCamPage) {
@@ -1160,12 +1451,19 @@ void update(float dt) {
             full = (full ^ row.answerable) * 16777619u;
         }
         unlockState();
+#if defined(BOARD_HAS_MEDIA_PAGE)
+        if (s_page == pageMedia()) {
+            lockState();
+            full = (full ^ s_mediaGen) * 16777619u;
+            unlockState();
+        }
+#endif
         snprintf(sig, sizeof(sig), "%lu|%s|%d%d%d%d|%u|%u", (unsigned long)full, s_pinId,
                  s_newResult, s_waitingFilter, focus.ended, s_pendingReply.active, s_sessionOffset, s_waiting.count);
     }
     // Viewfinder frames stream outside the signature: the canvas buffer is
     // updated in place and invalidated, no widget churn.
-    if (s_page == PAGE_CAM && s_camCanvas && s_camBuf &&
+    if (onCamPage() && s_camCanvas && s_camBuf &&
         (uint32_t)(now - s_camLastFrameMs) >= CAM_PREVIEW_INTERVAL_MS) {
         s_camLastFrameMs = now;
         if (Camera::grabPreview(s_camBuf, CAM_VIEW_W, CAM_VIEW_H)) {
@@ -1193,6 +1491,9 @@ void update(float dt) {
         }
     }
 #endif
+#if defined(BOARD_HAS_MEDIA_PAGE)
+    if (s_page == pageMedia()) updateMediaLive(now);
+#endif
     if (strcmp(sig, s_lastSig) == 0) return;
     strncpy(s_lastSig, sig, sizeof(s_lastSig) - 1);
     s_lastSig[sizeof(s_lastSig) - 1] = '\0';
@@ -1211,12 +1512,23 @@ void update(float dt) {
     }
     if (power.valid) {
         char battery[24];
+#if defined(BOARD_WAVESHARE_349)
+        // Voltage-derived percentage (no gauge); the glyph follows the level.
+        const char* cell = power.soc >= 85 ? LV_SYMBOL_BATTERY_FULL : power.soc >= 60 ? LV_SYMBOL_BATTERY_3
+                         : power.soc >= 35 ? LV_SYMBOL_BATTERY_2 : power.soc >= 12 ? LV_SYMBOL_BATTERY_1
+                         : LV_SYMBOL_BATTERY_EMPTY;
+        snprintf(battery, sizeof(battery), "%s%s %u%%", power.charging ? LV_SYMBOL_CHARGE : "", cell, power.soc);
+        lv_label_set_text(s_hdrBattery, battery);
+        lv_obj_set_style_text_color(s_hdrBattery, lv_color_hex(power.charging ? Theme::StatusCyan
+            : power.soc < 15 ? Theme::StatusRed : power.soc < 30 ? Theme::StatusAmber : Theme::HUDDim), 0);
+#else
         snprintf(battery, sizeof(battery), "%s%s %.2fV",
                  power.charging ? LV_SYMBOL_CHARGE : "",
                  LV_SYMBOL_BATTERY_FULL, power.voltageMv / 1000.0f);
         lv_label_set_text(s_hdrBattery, battery);
         lv_obj_set_style_text_color(s_hdrBattery,
             lv_color_hex(power.charging ? Theme::StatusCyan : Theme::HUDDim), 0);
+#endif
     } else if (power.usbPowered) {
         lv_label_set_text(s_hdrBattery, "USB");
         lv_obj_set_style_text_color(s_hdrBattery, lv_color_hex(Theme::StatusCyan), 0);
@@ -1226,6 +1538,9 @@ void update(float dt) {
 
     lv_obj_clean(s_body);
     s_camCanvas = nullptr;  // owned by s_body — gone with the clean
+#if defined(BOARD_HAS_MEDIA_PAGE)
+    s_mFill = s_mKnob = s_mElapsed = s_mRemain = nullptr;
+#endif
     {
         lockState();
         bool connectedNow = g_state.wsConnected;
@@ -1247,7 +1562,10 @@ void update(float dt) {
             renderFocusPage(focus, true);
         }
         else if (s_page == 1) renderUsagePage();
-        else if (s_page == PAGE_CAM) renderCameraPage();
+        else if (onCamPage()) renderCameraPage();
+#if defined(BOARD_HAS_MEDIA_PAGE)
+        else if (s_page == pageMedia()) renderMediaPage();
+#endif
         else renderSessionsPage();
     }
 }

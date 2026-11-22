@@ -279,14 +279,24 @@ int16_t touchLastY() { return s_lastGy; }
 int16_t touchMaxX() { return s_maxX; }
 int16_t touchMaxY() { return s_maxY; }
 
+static bool prevDown = false;
+static int16_t startX = 0, startY = 0, lastX = 0, lastY = 0;
+
+bool touchActive(int16_t* x, int16_t* y, int16_t* sx, int16_t* sy) {
+    if (!prevDown) return false;
+    if (x) *x = lastX;
+    if (y) *y = lastY;
+    if (sx) *sx = startX;
+    if (sy) *sy = startY;
+    return true;
+}
+
 TouchEvent touchPoll(uint32_t nowMs) {
-    TouchEvent event = {TouchGesture::NONE, 0, 0};
+    TouchEvent event = {TouchGesture::NONE, 0, 0, 0, 0};
     if (!s_enabled) return event;
 
-    static bool prevDown = false;
     static uint32_t downSince = 0;
     static bool holdFired = false;
-    static int16_t startX = 0, startY = 0, lastX = 0, lastY = 0;
 
     // Vendor-style read: full point array (some CSTXXX firmwares report 0
     // touched when asked for fewer slots than the chip supports).
@@ -317,7 +327,7 @@ TouchEvent touchPoll(uint32_t nowMs) {
         lastY = rawY;
         if (!holdFired && (uint32_t)(nowMs - downSince) >= HOLD_MS) {
             holdFired = true;
-            event = {TouchGesture::HOLD, lastX, lastY};
+            event = {TouchGesture::HOLD, lastX, lastY, startX, startY};
             return event;
         }
         return event;
@@ -329,6 +339,8 @@ TouchEvent touchPoll(uint32_t nowMs) {
         int16_t dy = lastY - startY;
         event.x = lastX;
         event.y = lastY;
+        event.startX = startX;
+        event.startY = startY;
         if (!holdFired && abs(dx) >= SWIPE_MIN_PX && abs(dx) > abs(dy)) {
             event.gesture = dx < 0 ? TouchGesture::SWIPE_LEFT : TouchGesture::SWIPE_RIGHT;
             s_gestures++;
@@ -341,6 +353,8 @@ TouchEvent touchPoll(uint32_t nowMs) {
             s_lastGy = lastY;
             return event;
         }
+        event.gesture = TouchGesture::RELEASE;
+        return event;
     }
     return event;
 }

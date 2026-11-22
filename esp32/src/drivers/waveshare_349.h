@@ -13,6 +13,7 @@
 #include <Wire.h>
 #include <Arduino_GFX_Library.h>
 #include <esp_heap_caps.h>
+#include <driver/gpio.h>
 
 namespace Ws349 {
 
@@ -58,7 +59,11 @@ inline void earlyPower() {
 
 // ── Backlight: PWM active low (V2 GPIO42, V1 GPIO8), V2 enable on EXIO1 ────
 
-inline void backlightBegin() { ledcAttach(BOARD_PIN_BL, 50000, 8); }
+inline void backlightBegin() {
+    // Deep sleep held the pin high (dark); give it back to the PWM.
+    gpio_hold_dis((gpio_num_t)BOARD_PIN_BL);
+    ledcAttach(BOARD_PIN_BL, 50000, 8);
+}
 
 inline void brightness(uint8_t level) {
     exio(EXIO_BL_EN, level > 0);
@@ -102,6 +107,19 @@ public:
         bus_->endWrite();
         delay(100);
         return true;
+    }
+
+    /** Display off + sleep in (before deep sleep; a reset wakes it). */
+    void sleep() {
+        if (!bus_) return;
+        bus_->beginWrite();
+        bus_->writeCommand(0x28);
+        bus_->endWrite();
+        delay(20);
+        bus_->beginWrite();
+        bus_->writeCommand(0x10);
+        bus_->endWrite();
+        delay(120);
     }
 
     /** Push a whole landscape frame (kW x kH, native RGB565), turned 90 degrees
