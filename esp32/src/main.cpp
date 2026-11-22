@@ -557,6 +557,9 @@ static void uiTask(void* param) {
         {
             // Battery only: on USB the strip is a desk fixture and stays up.
             const Input::PowerStatus ps = Input::powerStatus();
+            // Media playing counts as use while the battery has more than 25 %;
+            // the 10 min start when it stops or the battery gets there.
+            if (ps.valid && ps.soc > 25 && Ticker::mediaPlaying()) lastActivityMs = now;
             if (ps.valid && !ps.usbPowered && now - lastActivityMs >= IDLE_SLEEP_MS &&
                 !Audio::micCapturing() && !Net::voiceUploadBusy())
                 stripDeepSleep("idle on battery");

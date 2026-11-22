@@ -44,6 +44,9 @@ void onVoiceResult(const char* text, bool pending, const char* note);
 #endif
 #if defined(BOARD_HAS_MEDIA_PAGE)
 /** media_state from the daemon (network task): the host's MPRIS player. */
+/** Host media is playing, per a media_state at most 45 s old (the daemon
+ *  repeats it every 15 s, so an old "playing" from a lost link does not count). */
+bool mediaPlaying();
 void onMediaState(const char* player, const char* status, const char* title, const char* artist,
                   uint32_t posMs, uint32_t lenMs, float rate, bool canRate, uint8_t players,
                   int32_t localDayMs);

@@ -1015,6 +1015,13 @@ static bool mediaTouch(const Input::TouchEvent& e) {
 namespace Ticker {
 
 #if defined(BOARD_HAS_MEDIA_PAGE)
+bool mediaPlaying() {
+    lockState();
+    const bool playing = !strcmp(s_media.status, "playing") && s_media.atMs && millis() - s_media.atMs < 45000;
+    unlockState();
+    return playing;
+}
+
 void onMediaState(const char* player, const char* status, const char* title, const char* artist,
                   uint32_t posMs, uint32_t lenMs, float rate, bool canRate, uint8_t players,
                   int32_t localDayMs) {
