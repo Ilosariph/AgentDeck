@@ -106,6 +106,7 @@ import { answerTmuxPermission, refreshTmuxPanes, tmuxPermissionRequestId, TMUX_P
 import { injectObservedSelection, injectObservedText, injectTextViaTmux, type InjectResult } from './observed-inject.js';
 import { ClaudeInbox, type InboxResult } from './claude-inbox.js';
 import { MediaWatcher, type MediaAction } from './media-mpris.js';
+import { BrowserMediaBridge } from './browser-media-bridge.js';
 import {
   setSerialCommandSink, setSerialVoiceSink, setSerialQuiesceCheck, sendSerialJson,
   serialPortConnected, serialPortCapabilities, serialPortBoard,
@@ -8274,6 +8275,8 @@ export async function startDaemon(opts: DaemonOptions): Promise<void> {
     return out;
   };
   let mediaTargetCount = 0;
+  // Page speed in browsers comes through the media-speed extension.
+  const browserMedia = new BrowserMediaBridge(() => mediaWatcher.pageChanged(), log);
   const mediaWatcher = new MediaWatcher(
     (msg) => { const line = JSON.stringify(msg); for (const send of mediaTargets()) send(line); },
     () => {
@@ -8283,8 +8286,10 @@ export async function startDaemon(opts: DaemonOptions): Promise<void> {
       return n > 0;
     },
     log,
+    browserMedia,
   );
   mediaWatcher.start();
+  browserMedia.start();
 
   // ===== Client connect =====
   core.wsServer.onClientConnect((ws) => {

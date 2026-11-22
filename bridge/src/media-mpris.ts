@@ -137,6 +137,20 @@ export function worthSending(prev: MediaStateMessage | undefined, prevAt: number
   return now - prevAt > 15_000;   // periodic resync against drift
 }
 
+/** Browsers: MPRIS says 1x, fixed; the speed comes from the page via the extension. */
+const BROWSERS = ['firefox', 'librewolf', 'floorp', 'zen', 'chromium', 'chrome', 'google-chrome', 'brave', 'vivaldi', 'edge'];
+export function isBrowserPlayer(instance: string): boolean {
+  return BROWSERS.includes(playerLabel(instance).toLowerCase());
+}
+// Range offered for a page (Firefox mutes audio above 4x).
+const PAGE_MIN_RATE = 0.25, PAGE_MAX_RATE = 4;
+
+/** The browser extension bridge (browser-media-bridge.ts), as far as the watcher needs it. */
+export interface PageRate {
+  rate(): number | undefined;
+  setRate(rate: number): boolean;
+}
+
 export class MediaWatcher {
   private timer: NodeJS.Timeout | null = null;
   private busy = false;
@@ -151,7 +165,23 @@ export class MediaWatcher {
     private readonly send: (msg: MediaStateMessage) => void,
     private readonly wanted: () => boolean,
     private readonly log: (line: string) => void = () => {},
+    private readonly page?: PageRate,
   ) {}
+
+  /** The extension reported (new speed, page left): show it without waiting a poll. */
+  pageChanged(): void {
+    if (!this.shown || !isBrowserPlayer(this.shown.instance) || this.busy) return;
+    this.applyPageRate(this.shown);
+    this.publish(false);
+  }
+
+  private applyPageRate(p: MprisPlayer): void {
+    const rate = this.page?.rate();
+    if (rate === undefined) return;
+    p.rate = rate;
+    p.minRate = PAGE_MIN_RATE;
+    p.maxRate = PAGE_MAX_RATE;
+  }
 
   start(): void {
     if (this.timer) return;
@@ -193,6 +223,7 @@ export class MediaWatcher {
           MPRIS_PATH, MPRIS_PLAYER, 'Rate', 'MinimumRate', 'MaximumRate'], { encoding: 'utf8', timeout: 2_000 });
         Object.assign(this.shown, parseRates(r) ?? {});
       } catch { /* player without Rate: stays 1x, not adjustable */ }
+      if (isBrowserPlayer(this.shown.instance)) this.applyPageRate(this.shown);
     }
   }
 
@@ -235,6 +266,11 @@ export class MediaWatcher {
       if (p.minRate >= p.maxRate) return;
       const rate = !value ? Math.min(Math.max(1, p.minRate), p.maxRate)
         : stepRate(p.rate, Number(value) > 0 ? 1 : -1, p.minRate, p.maxRate);
+      if (isBrowserPlayer(target) && this.page?.rate() !== undefined) {
+        if (this.page.setRate(rate)) p.rate = rate;
+        this.publish(true);
+        return;
+      }
       try {
         await execFileAsync('busctl', ['--user', 'set-property', busName(target), MPRIS_PATH, MPRIS_PLAYER,
           'Rate', 'd', String(rate)], { timeout: 2_000 });
