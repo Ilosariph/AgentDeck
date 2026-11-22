@@ -46,4 +46,31 @@ describe('browser media bridge', () => {
       bridge.stop();
     }
   });
+
+  it('advances the page position by speed and seeks the page', async () => {
+    const bridge = new BrowserMediaBridge(() => {}, () => {}, PORT);
+    bridge.start();
+    await tick();
+    try {
+      const ws = await open('moz-extension://x');
+      const got: unknown[] = [];
+      ws.on('message', (d) => got.push(JSON.parse(String(d))));
+      ws.send(JSON.stringify({ type: 'state', rate: 1, playing: true, title: 'v' }));
+      await tick();
+      expect(bridge.media()?.positionMs).toBeUndefined();   // pre-0.3.0 extension
+      expect(bridge.seek(5000)).toBe(false);
+      const at = Date.now();
+      ws.send(JSON.stringify({ type: 'state', rate: 2, playing: true, title: 'v', position: 10, duration: 600, at }));
+      await tick();
+      expect(bridge.media(at + 1000)).toMatchObject({ positionMs: 12000, lengthMs: 600000, rate: 2 });
+      expect(bridge.media(at + 10_000_000)?.positionMs).toBe(600000);
+      expect(bridge.seek(42000)).toBe(true);
+      await tick();
+      expect(got).toEqual([{ type: 'seek', position: 42 }]);
+      expect(Math.abs(bridge.media()!.positionMs! - 42000)).toBeLessThan(500);
+      ws.close();
+    } finally {
+      bridge.stop();
+    }
+  });
 });

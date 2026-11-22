@@ -149,6 +149,8 @@ const PAGE_MIN_RATE = 0.25, PAGE_MAX_RATE = 4;
 export interface PageRate {
   rate(): number | undefined;
   setRate(rate: number): boolean;
+  media?(): { rate: number; positionMs?: number; lengthMs?: number } | undefined;
+  seek?(positionMs: number): boolean;
 }
 
 export class MediaWatcher {
@@ -184,6 +186,10 @@ export class MediaWatcher {
     p.rate = rate;
     p.minRate = PAGE_MIN_RATE;
     p.maxRate = PAGE_MAX_RATE;
+    // Firefox's MPRIS reports no length and a near-zero position for pages.
+    const m = this.page?.media?.();
+    if (m?.lengthMs !== undefined) p.lengthMs = m.lengthMs;
+    if (m?.positionMs !== undefined) p.positionMs = m.positionMs;
   }
 
   start(): void {
@@ -307,6 +313,17 @@ export class MediaWatcher {
       }
       await this.repoll();
       return;
+    }
+    if ((action === 'seek' || action === 'seek_by') && Number.isFinite(value) && isBrowserPlayer(target)
+        && this.page?.media?.()?.positionMs !== undefined) {
+      const p = this.shown!;
+      const raw = action === 'seek' ? Number(value) : this.shownPositionMs(Date.now()) + Number(value);
+      const ms = Math.max(0, p.lengthMs ? Math.min(raw, p.lengthMs) : raw);
+      if (this.page.seek?.(ms)) {
+        p.positionMs = Math.round(ms);
+        this.publish(true);
+        return;
+      }
     }
     let args: string[];
     if (action === 'toggle') args = ['play-pause'];
