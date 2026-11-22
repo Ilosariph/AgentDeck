@@ -46,6 +46,9 @@ describe('media-mpris', () => {
     expect(stepRate(1, -1, 0.25, 4)).toBe(0.75);
     expect(stepRate(2, 1, 0.5, 2)).toBe(2);
     expect(stepRate(1.1, 1, 0.25, 4)).toBe(1.25);
+    expect(stepRate(2, 1, 0.25, 4)).toBe(2.25);
+    expect(stepRate(3.25, 1, 0.25, 4)).toBe(3.5);
+    expect(stepRate(3.5, 1, 0.25, 4)).toBe(3.5);
     expect(toMessage({ instance: 'x', status: 'playing', positionMs: 0, lengthMs: 0, title: '', artist: '', rate: 1, minRate: 1, maxRate: 1 }, 1).canRate).toBe(false);
   });
 });

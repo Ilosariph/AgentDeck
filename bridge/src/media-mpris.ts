@@ -46,7 +46,7 @@ export interface MediaStateMessage {
 export type MediaAction = 'toggle' | 'next' | 'previous' | 'seek' | 'seek_by' | 'cycle' | 'rate';
 
 /** Speeds the board steps through (clamped to what the player allows). */
-export const RATE_STEPS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.5, 3];
+export const RATE_STEPS = Array.from({ length: 14 }, (_, i) => (i + 1) / 4);   // 0.25 … 3.5
 
 const MPRIS_PATH = '/org/mpris/MediaPlayer2';
 const MPRIS_PLAYER = 'org.mpris.MediaPlayer2.Player';
@@ -160,6 +160,9 @@ export class MediaWatcher {
   private startedAt = new Map<string, number>();
   private last: MediaStateMessage | undefined;
   private lastAt = 0;
+  // After a seek, browsers report a stale position (often 0) for a few seconds.
+  // Until the player agrees, the expected position wins.
+  private seekHold: { instance: string; positionMs: number; at: number; until: number } | undefined;
 
   constructor(
     private readonly send: (msg: MediaStateMessage) => void,
@@ -224,7 +227,32 @@ export class MediaWatcher {
         Object.assign(this.shown, parseRates(r) ?? {});
       } catch { /* player without Rate: stays 1x, not adjustable */ }
       if (isBrowserPlayer(this.shown.instance)) this.applyPageRate(this.shown);
+      this.applySeekHold(this.shown, now);
     }
+  }
+
+  private applySeekHold(p: MprisPlayer, now: number): void {
+    const h = this.seekHold;
+    if (!h) return;
+    if (h.instance !== p.instance || now > h.until) { this.seekHold = undefined; return; }
+    const expected = h.positionMs + (p.status === 'playing' ? (now - h.at) * p.rate : 0);
+    if (Math.abs(p.positionMs - expected) < 1500) { this.seekHold = undefined; return; }
+    p.positionMs = Math.round(p.lengthMs ? Math.min(expected, p.lengthMs) : expected);
+  }
+
+  /** Where a seek lands, from the position the board was last shown. */
+  private holdSeek(p: MprisPlayer, positionMs: number): void {
+    const now = Date.now();
+    const pos = Math.max(0, p.lengthMs ? Math.min(positionMs, p.lengthMs) : positionMs);
+    this.seekHold = { instance: p.instance, positionMs: pos, at: now, until: now + 5000 };
+    p.positionMs = Math.round(pos);
+    this.publish(true);
+  }
+
+  private shownPositionMs(now: number): number {
+    const l = this.last;
+    if (!l) return this.shown?.positionMs ?? 0;
+    return l.positionMs + (l.status === 'playing' ? (now - this.lastAt) * l.rate : 0);
   }
 
   private async tick(): Promise<void> {
@@ -287,9 +315,12 @@ export class MediaWatcher {
     else if (action === 'seek' && Number.isFinite(value)) {
       const ms = Math.max(0, Math.min(Number(value), this.shown?.lengthMs || Number(value)));
       args = ['position', (ms / 1000).toFixed(3)];
+      this.holdSeek(this.shown!, ms);
     } else if (action === 'seek_by' && Number.isFinite(value) && value) {
-      const s = Math.abs(Number(value)) / 1000;
-      args = ['position', `${s.toFixed(3)}${Number(value) < 0 ? '-' : '+'}`];
+      // Absolute, from what the board shows: "+10" on a stale browser position would jump wrong.
+      const ms = Math.max(0, this.shownPositionMs(Date.now()) + Number(value));
+      args = ['position', (ms / 1000).toFixed(3)];
+      this.holdSeek(this.shown!, ms);
     } else return;
     try {
       await execFileAsync('playerctl', ['-p', target, ...args], { timeout: 2_000 });
