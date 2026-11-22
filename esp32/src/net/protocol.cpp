@@ -1576,6 +1576,9 @@ static void sendDeviceInfo() {
             caps.add("voice_draft");   // transcripts come back as drafts (voice_confirm)
         }
         caps.add("media");   // MEDIA page: media_state in, media_control out
+#if defined(BOARD_HAS_HOST_LOCK)
+        caps.add("host_lock");   // lock screen while the PC is locked
+#endif
         Input::PowerStatus ps = Input::powerStatus();
         if (ps.valid) {
             caps.add("battery");
@@ -1776,6 +1779,12 @@ void parseMessage(const char* json, size_t length) {
         else snprintf(note, sizeof(note), "NOT sent: %.20s", obj["deliverReason"] | "no target");
         Utf8::utf8TrimEnd(note);
         Ticker::onVoiceResult(text, pending && !err[0] && text[0], note);
+#endif
+#if defined(BOARD_HAS_HOST_LOCK)
+    } else if (strcmp(type, "host_lock") == 0) {
+        Ticker::onHostLock(obj["locked"] | false);
+#endif
+#if defined(BOARD_HAS_MEDIA_PAGE)
     } else if (strcmp(type, "media_state") == 0) {
         Ticker::onMediaState(obj["player"] | "", obj["status"] | "none", obj["title"] | "",
                              obj["artist"] | "", obj["positionMs"] | 0u, obj["lengthMs"] | 0u,

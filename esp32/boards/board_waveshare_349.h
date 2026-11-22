@@ -54,6 +54,7 @@
 // MEDIA page: the host's MPRIS player (media_state), scrubbed by dragging the
 // timeline; play/pause, previous/next, ±10 s and playback speed.
 #define BOARD_HAS_MEDIA_PAGE 1
+#define BOARD_HAS_HOST_LOCK 1   // host_lock: lock screen while the PC is locked
 
 // Battery: GPIO4 (ADC1 ch3) behind a 1:3 divider. PWR wakes from deep sleep.
 #define BOARD_PIN_BAT_ADC    4

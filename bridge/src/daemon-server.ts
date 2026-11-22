@@ -107,6 +107,7 @@ import { injectObservedSelection, injectObservedText, injectTextViaTmux, type In
 import { ClaudeInbox, type InboxResult } from './claude-inbox.js';
 import { MediaWatcher, type MediaAction } from './media-mpris.js';
 import { BrowserMediaBridge } from './browser-media-bridge.js';
+import { LOCKED_REFUSED_COMMANDS, ScreenLockWatcher } from './screen-lock.js';
 import {
   setSerialCommandSink, setSerialVoiceSink, setSerialQuiesceCheck, sendSerialJson,
   serialPortConnected, serialPortCapabilities, serialPortBoard,
@@ -7821,12 +7822,39 @@ export async function startDaemon(opts: DaemonOptions): Promise<void> {
    * session append, so a long instruction can be dictated in pieces, and a
    * misheard one is cleared without ever reaching the agent.
    */
+  // ===== Screen lock: a locked PC locks the boards =====
+  // Boards that advertise `host_lock` show a lock screen and ignore input; the
+  // daemon refuses their acting commands and voice regardless, so a board on
+  // older firmware (or anything speaking its protocol) cannot act either.
+  const sendLockState = (): void => {
+    const line = JSON.stringify({ type: 'host_lock', locked: screenLock.locked });
+    for (const send of boardTargets('host_lock')) send(line);
+  };
+  const screenLock = new ScreenLockWatcher((locked) => {
+    log(`[agentdeck] PC ${locked ? 'locked: boards locked' : 'unlocked: boards unlocked'}`);
+    sendLockState();
+  }, log);
+  // Boards that (re)attach or reboot while locked learn it here.
+  setInterval(() => { if (screenLock.locked) sendLockState(); }, 5_000).unref?.();
+  const refusedWhileLocked = (what: string, sink?: { describe(): string }): boolean => {
+    if (!screenLock.locked) return false;
+    log(`[agentdeck] PC locked: refused ${what}${sink ? ` from ${sink.describe()}` : ''}`);
+    return true;
+  };
+
   const VOICE_DRAFT_MAX_CHARS = 2000;
   const VOICE_DRAFT_TTL_MS = 30 * 60_000;
   const voiceDrafts = new Map<string, { sessionId: string; board: string; text: string; at: number }>();
 
   const confirmVoiceDraft = (msg: { sessionId?: unknown; send?: unknown }, sink: ReplySink): void => {
     const device = sink.deviceKey();
+    if (msg.send === true && refusedWhileLocked('voice draft send', sink)) {
+      try {
+        sink.send(JSON.stringify({ type: 'voice_result', text: '', sessionId: voiceDrafts.get(device)?.sessionId ?? '',
+          delivered: false, deliverReason: 'pc locked' }));
+      } catch { /* client disconnecting */ }
+      return;   // the draft stays for after unlocking
+    }
     const draft = voiceDrafts.get(device);
     voiceDrafts.delete(device);
     const fresh = draft && Date.now() - draft.at < VOICE_DRAFT_TTL_MS;
@@ -7858,6 +7886,14 @@ export async function startDaemon(opts: DaemonOptions): Promise<void> {
     },
     sink: ReplySink,
   ): Promise<void> => {
+        if (refusedWhileLocked('voice', sink)) {
+          captured.cleanup();
+          try {
+            sink.send(JSON.stringify({ type: 'voice_result', text: '', sessionId: captured.sessionId,
+              delivered: false, deliverReason: 'pc locked' }));
+          } catch { /* client disconnecting */ }
+          return;
+        }
         const device = sink.deviceKey();
         const generation = randomUUID();
         if (voiceDeliveryGenerations.size >= 256) voiceDeliveryGenerations.delete(voiceDeliveryGenerations.keys().next().value!);
@@ -8246,7 +8282,14 @@ export async function startDaemon(opts: DaemonOptions): Promise<void> {
     }
   }, 30_000).unref?.();
 
-  core.wsServer.onCommand(handleDeviceCommand);
+  core.wsServer.onCommand((cmd, sender) => {
+    if (sender && core.wsServer.isEsp32Client(sender) && LOCKED_REFUSED_COMMANDS.has(cmd.type as string)
+        && refusedWhileLocked(String(cmd.type))) {
+      try { sender.send(JSON.stringify({ type: 'host_lock', locked: true })); } catch { /* gone */ }
+      return;
+    }
+    handleDeviceCommand(cmd, sender);
+  });
   // Idle display-only boards send no messages — their protocol pongs are the
   // only liveness signal. Without this, every healthy quiet XTeink read as
   // "stale" in /devices and the roster aged it toward eviction.
@@ -8254,26 +8297,34 @@ export async function startDaemon(opts: DaemonOptions): Promise<void> {
   // Serial-attached boards get the SAME command pipeline: their steering taps
   // arrive over USB when WiFi is parked (serial-primary), and used to be
   // silently dropped by the device_info-only serial parser.
-  setSerialCommandSink((c) => handleDeviceCommand(c as unknown as PluginCommand));
+  setSerialCommandSink((c) => {
+    if (LOCKED_REFUSED_COMMANDS.has(String(c.type)) && refusedWhileLocked(`${String(c.type)} over serial`)) {
+      sendLockState();
+      return;
+    }
+    handleDeviceCommand(c as unknown as PluginCommand);
+  });
 
   // ===== Now playing (MPRIS) for boards that advertise `media` =====
   // Each board once: over USB when it is attached there, else its WiFi socket.
-  const mediaTargets = (): Array<(line: string) => void> => {
+  // Each board once, over USB when it is attached there, else its WiFi socket.
+  function boardTargets(capability: string): Array<(line: string) => void> {
     const out: Array<(line: string) => void> = [];
     const serialBoards = new Set<string>();
     for (const c of getSerialConnectionStatus()) {
-      if (!c.connected || !serialPortCapabilities(c.port).includes('media')) continue;
+      if (!c.connected || !serialPortCapabilities(c.port).includes(capability)) continue;
       if (c.board) serialBoards.add(c.board);
       out.push((line) => { sendSerialJson(c.port, line); });
     }
     for (const [key, sock] of wifiEsp32Sockets) {
       const d = wifiEsp32Devices.get(key);
-      if (sock.readyState !== WebSocket.OPEN || !d?.capabilities?.includes('media')) continue;
+      if (sock.readyState !== WebSocket.OPEN || !d?.capabilities?.includes(capability)) continue;
       if (d.board && serialBoards.has(d.board)) continue;
       out.push((line) => { try { sock.send(line); } catch { /* disconnecting */ } });
     }
     return out;
-  };
+  }
+  const mediaTargets = (): Array<(line: string) => void> => boardTargets('media');
   let mediaTargetCount = 0;
   // Page speed in browsers comes through the media-speed extension.
   const browserMedia = new BrowserMediaBridge(() => mediaWatcher.pageChanged(), log);
@@ -8290,6 +8341,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<void> {
   );
   mediaWatcher.start();
   browserMedia.start();
+  screenLock.start();
 
   // ===== Client connect =====
   core.wsServer.onClientConnect((ws) => {

@@ -156,6 +156,54 @@ static void sendFocusSession(const char* sid) {
     Net::queueOutbound(buf);
 }
 
+#if defined(BOARD_HAS_HOST_LOCK)
+// Set from the network task. The daemon repeats `locked` every 5 s; a lock not
+// repeated for 30 s lapses (daemon gone: nothing would act on input anyway).
+static volatile bool s_hostLocked = false;
+static volatile uint32_t s_hostLockAtMs = 0;
+static constexpr uint32_t HOST_LOCK_LAPSE_MS = 30000;
+static lv_obj_t* s_lockOverlay = nullptr;
+
+void Ticker::onHostLock(bool locked) {
+    s_hostLockAtMs = millis();
+    s_hostLocked = locked;
+}
+
+bool Ticker::hostLocked() {
+    return s_hostLocked && millis() - s_hostLockAtMs < HOST_LOCK_LAPSE_MS;
+}
+
+// Opaque, on the top layer: nothing of the sessions shows while locked.
+static void updateHostLockOverlay() {
+    const bool locked = Ticker::hostLocked();
+    if (!locked) {
+        if (s_lockOverlay) lv_obj_add_flag(s_lockOverlay, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+    if (!s_lockOverlay) {
+        s_lockOverlay = lv_obj_create(lv_layer_top());
+        lv_obj_remove_style_all(s_lockOverlay);
+        lv_obj_set_size(s_lockOverlay, SCREEN_W, SCREEN_H);
+        lv_obj_set_pos(s_lockOverlay, 0, 0);
+        lv_obj_set_style_bg_color(s_lockOverlay, lv_color_hex(0x000000), 0);
+        lv_obj_set_style_bg_opa(s_lockOverlay, LV_OPA_COVER, 0);
+        lv_obj_clear_flag(s_lockOverlay, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_t* title = lv_label_create(s_lockOverlay);
+        lv_label_set_text(title, LV_SYMBOL_EYE_CLOSE "  PC LOCKED");
+        lv_obj_set_style_text_font(title, &lv_font_montserrat_18, 0);
+        lv_obj_set_style_text_color(title, lv_color_hex(Theme::HUDText), 0);
+        lv_obj_align(title, LV_ALIGN_CENTER, 0, -12);
+        lv_obj_t* hint = lv_label_create(s_lockOverlay);
+        lv_label_set_text(hint, "unlock the PC to use the deck");
+        lv_obj_set_style_text_font(hint, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(hint, lv_color_hex(Theme::HUDDim), 0);
+        lv_obj_align(hint, LV_ALIGN_CENTER, 0, 16);
+    }
+    lv_obj_clear_flag(s_lockOverlay, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(s_lockOverlay);
+}
+#endif
+
 static void flash(const char* text) {
     strncpy(s_flashText, text, sizeof(s_flashText) - 1);
     s_flashText[sizeof(s_flashText) - 1] = '\0';
@@ -1129,6 +1177,9 @@ void buttonFeedback(uint8_t button) {
 
 void onTouch(const Input::TouchEvent& event) {
     if (event.gesture == Input::TouchGesture::NONE) return;
+#if defined(BOARD_HAS_HOST_LOCK)
+    if (hostLocked()) return;
+#endif
 #if defined(BOARD_HAS_MEDIA_PAGE)
     if (s_page == pageMedia() && event.y >= BODY_Y && event.startY >= BODY_Y) {
         lockState();
@@ -1273,6 +1324,9 @@ void update(float dt) {
     (void)dt;
     uint32_t now = millis();
     updateKeyHints(now);
+#if defined(BOARD_HAS_HOST_LOCK)
+    updateHostLockOverlay();
+#endif
 
     // Camera power follows the page: acquire on entry, release on leave.
     // Keeping the sensor powered around the clock tripped the brownout

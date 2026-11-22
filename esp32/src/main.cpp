@@ -486,8 +486,11 @@ static void uiTask(void* param) {
 
         Input::powerPoll(now);
 
+        // PC locked (host_lock): BOOT does nothing, a recording is dropped.
+        const bool hostLocked = Ticker::hostLocked();
+
         // BOOT: a hold talks, a tap acts on release.
-        const bool boot = digitalRead(BOARD_PIN_BTN_BOOT) == LOW;
+        const bool boot = !hostLocked && digitalRead(BOARD_PIN_BTN_BOOT) == LOW;
         if (boot) lastActivityMs = now;
         if (boot && !bootDown) { bootDown = true; bootSince = now; }
         if (boot && bootDown && !bootTalking && now - bootSince >= TALK_HOLD_MS && Audio::micReady()) {
@@ -510,10 +513,10 @@ static void uiTask(void* param) {
             bootDown = false;
             if (bootTalking) {
                 bootTalking = false;
-                const bool tooShort = now - talkSince < MIN_TALK_MS;
+                const bool tooShort = hostLocked || now - talkSince < MIN_TALK_MS;
                 Audio::micStop(tooShort);
                 if (tooShort) Ticker::voiceCancelled(); else Ticker::voiceRecording(false);
-            } else if (now - bootSince < TALK_HOLD_MS) {
+            } else if (!hostLocked && now - bootSince < TALK_HOLD_MS) {
                 if (Ticker::voiceDraftActive()) Ticker::voiceSend();
                 else Ticker::primaryAction();
             }
@@ -536,7 +539,7 @@ static void uiTask(void* param) {
         if (!pwr && pwrDown) {
             pwrDown = false;
             if (!pwrFired && pwrSleep) stripDeepSleep("PWR");
-            if (!pwrFired && now - pwrSince >= 30) {
+            if (!pwrFired && !hostLocked && now - pwrSince >= 30) {
                 if (Ticker::voiceDraftActive()) Ticker::voiceClear();
                 else Ticker::nextPage();
             }
