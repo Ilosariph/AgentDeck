@@ -719,7 +719,9 @@ static uint32_t s_mediaGen = 0;
 static lv_obj_t *s_mFill = nullptr, *s_mKnob = nullptr, *s_mElapsed = nullptr, *s_mRemain = nullptr;
 
 static constexpr int M_BAR_X = 16, M_BAR_W = SCREEN_W - 32, M_BAR_Y = 70, M_BAR_H = 8;
-static constexpr int M_SCRUB_Y0 = M_BAR_Y - 16, M_SCRUB_Y1 = M_BAR_Y + 26;   // body coords
+static constexpr int M_SCRUB_Y0 = M_BAR_Y - 16, M_SCRUB_Y1 = M_BAR_Y + 20;   // body coords
+// Seeking takes a drag: a tap meant for a chip below must never move the video.
+static constexpr int M_DRAG_MIN = 16;
 static constexpr int M_CHIP_Y = BODY_H - 4 - 34, M_CHIP_H = 34;
 static constexpr int M_CHIP_W = 64, M_CHIP_GAP = 6;
 // Transport chips from the left; speed group (- / rate / +) from the right.
@@ -760,9 +762,15 @@ static void formatMediaTime(char* out, size_t n, uint32_t ms) {
 }
 
 static bool mediaScrubbing(int16_t* x) {
+    // Latched once the finger has travelled M_DRAG_MIN, for the rest of that touch.
+    static bool dragged = false;
+    static int16_t touchSx = -1, touchSy = -1;
     int16_t cx, cy, sx, sy;
-    if (!Input::touchActive(&cx, &cy, &sx, &sy)) return false;
+    if (!Input::touchActive(&cx, &cy, &sx, &sy)) { dragged = false; touchSx = touchSy = -1; return false; }
+    if (sx != touchSx || sy != touchSy) { dragged = false; touchSx = sx; touchSy = sy; }
     if (sy < BODY_Y + M_SCRUB_Y0 || sy >= BODY_Y + M_SCRUB_Y1) return false;
+    if (!dragged && abs(cx - sx) >= M_DRAG_MIN) dragged = true;
+    if (!dragged) return false;
     *x = cx;
     return true;
 }
@@ -890,8 +898,11 @@ static void renderMediaPage() {
 /** Touch on MEDIA. True when consumed (incl. swipes that started on the timeline). */
 static bool mediaTouch(const Input::TouchEvent& e) {
     const int sy = e.startY - BODY_Y;
-    if (e.startY >= BODY_Y && sy >= M_SCRUB_Y0 && sy < M_SCRUB_Y1) {
-        if (e.gesture == Input::TouchGesture::HOLD) return true;   // still dragging
+    const bool dragged = abs(e.x - e.startX) >= M_DRAG_MIN;
+    if (e.startY >= BODY_Y && sy >= M_SCRUB_Y0 && sy < M_SCRUB_Y1
+        && (dragged || e.gesture != Input::TouchGesture::TAP)) {
+        // Still dragging, or a press that never travelled: no seek.
+        if (e.gesture == Input::TouchGesture::HOLD || !dragged) return true;
         lockState();
         const uint32_t len = s_media.lenMs;
         const bool none = !strcmp(s_media.status, "none");
@@ -909,7 +920,8 @@ static bool mediaTouch(const Input::TouchEvent& e) {
         sendMediaControl("cycle");
         return true;
     }
-    if (y < M_CHIP_Y - 4 || y >= M_CHIP_Y + M_CHIP_H + 4) return true;
+    // Chips take everything below the timeline: a tap just above one still counts.
+    if (y < M_SCRUB_Y1 || y >= M_CHIP_Y + M_CHIP_H + 4) return true;
     lockState();
     const bool canRate = s_media.canRate;
     unlockState();
