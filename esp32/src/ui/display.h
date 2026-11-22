@@ -3,13 +3,16 @@
 #include <lvgl.h>
 
 /**
- * Montserrat 12 + Korean fallback (Noto Sans KR 12).
+ * Montserrat 12 + Latin (accents, quotes, dashes) + Korean fallback (Noto Sans KR 12).
  * RAM copy of lv_font_montserrat_12 with fallback pointer set.
  * Use &font_kr_12 instead of &lv_font_montserrat_12 for labels
  * that may display Korean text (session names, timeline, etc.).
  * Initialized in displayInit().
  */
 extern lv_font_t font_kr_12;
+/** Montserrat 12 with tabular digits (all one width), then font_kr_12's
+ *  fallbacks: for times that update in place without shifting. */
+extern lv_font_t font_time_12;
 #if defined(BOARD_IPS10)
 /** Larger Korean-safe faces (Latin at size, Korean via 12 px Noto fallback) for the IPS10 D1 detail overlay. */
 extern lv_font_t font_kr_16;

@@ -760,8 +760,9 @@ struct MediaState {
     float rate;
     bool canRate;
     uint8_t players;
+    int32_t localDayMs;   // host time of day at atMs; -1 = unknown (older daemon)
 };
-static MediaState s_media{{0}, "none", {0}, {0}, 0, 0, 0, 1.0f, false, 0};
+static MediaState s_media{{0}, "none", {0}, {0}, 0, 0, 0, 1.0f, false, 0, -1};
 static uint32_t s_mediaGen = 0;
 // Live widgets (children of s_body; reset on every body clean).
 static lv_obj_t *s_mFill = nullptr, *s_mKnob = nullptr, *s_mElapsed = nullptr, *s_mRemain = nullptr;
@@ -829,34 +830,51 @@ static void updateMediaLive(uint32_t now) {
     lockState();
     const uint32_t len = s_media.lenMs;
     uint32_t pos = mediaPositionNow(now);
+    const float rate = s_media.rate;
+    const int32_t dayMs = s_media.localDayMs;
+    const uint32_t atMs = s_media.atMs;
     unlockState();
     int16_t dragX;
     const bool dragging = len && mediaScrubbing(&dragX);
     if (dragging) pos = mediaXToMs(dragX, len);
     const int fill = len ? (int)((uint64_t)M_BAR_W * pos / len) : 0;
     static int lastFill = -1;
-    static uint32_t lastSec = UINT32_MAX;
     static bool lastDragging = false;
     if (fill != lastFill || lv_obj_get_width(s_mFill) != (fill > 0 ? fill : 1)) {
         lastFill = fill;
         lv_obj_set_width(s_mFill, fill > 0 ? fill : 1);
         lv_obj_set_x(s_mKnob, M_BAR_X + fill - 7);
     }
-    if (pos / 1000 != lastSec || dragging != lastDragging || !lv_label_get_text(s_mElapsed)[0]) {
-        lastSec = pos / 1000;
+    if (dragging != lastDragging) {
         lastDragging = dragging;
-        char a[16], b[24], l[16];
-        formatMediaTime(a, sizeof(a), pos);
-        lv_label_set_text(s_mElapsed, a);
         lv_obj_set_style_text_color(s_mElapsed, lv_color_hex(dragging ? Theme::StatusCyan : Theme::HUDText), 0);
-        if (len) {
-            formatMediaTime(l, sizeof(l), len);
-            char rem[16];
-            formatMediaTime(rem, sizeof(rem), len - (pos < len ? pos : len));
-            snprintf(b, sizeof(b), "-%s / %s", rem, l);
-        } else snprintf(b, sizeof(b), "live");
-        lv_label_set_text(s_mRemain, b);
     }
+    // Left: position and when it ends (host's 24 h clock, so also over USB
+    // without NTP). Right: remaining in wall-clock time at the current speed,
+    // and the length. Rebuilt every frame and set on change: paused, the end
+    // time still moves.
+    char a[40], b[40], cur[16];
+    formatMediaTime(cur, sizeof(cur), pos);
+    if (len) {
+        char rem[16], l[16];
+        const uint32_t remMs = (uint32_t)((len - (pos < len ? pos : len)) / (rate > 0.01f ? rate : 1.0f));
+        formatMediaTime(rem, sizeof(rem), remMs);
+        formatMediaTime(l, sizeof(l), len);
+        if (dayMs >= 0) {
+            const uint32_t endMin = (uint32_t)(((uint64_t)dayMs + (now - atMs) + remMs) / 60000 % 1440);
+            snprintf(a, sizeof(a), "%s \xC2\xB7 ends %02lu:%02lu", cur,
+                     (unsigned long)(endMin / 60), (unsigned long)(endMin % 60));
+            snprintf(b, sizeof(b), "-%s \xC2\xB7 %s", rem, l);
+        } else {
+            snprintf(a, sizeof(a), "%s", cur);
+            snprintf(b, sizeof(b), "-%s / %s", rem, l);
+        }
+    } else {
+        snprintf(a, sizeof(a), "%s", cur);
+        snprintf(b, sizeof(b), "live");
+    }
+    if (strcmp(lv_label_get_text(s_mElapsed), a) != 0) lv_label_set_text(s_mElapsed, a);
+    if (strcmp(lv_label_get_text(s_mRemain), b) != 0) lv_label_set_text(s_mRemain, b);
 }
 
 static void renderMediaPage() {
@@ -864,9 +882,10 @@ static void renderMediaPage() {
     lockState();
     m = s_media;
     unlockState();
-    Utf8::sanitizeLvglText(m.title);
-    Utf8::sanitizeLvglText(m.artist);
-    Utf8::sanitizeLvglText(m.player);
+    // font_kr_* labels: their fallback chain has the Latin accents.
+    Utf8::sanitizeLvglText(m.title, true);
+    Utf8::sanitizeLvglText(m.artist, true);
+    Utf8::sanitizeLvglText(m.player, true);
     const bool none = !strcmp(m.status, "none");
     const bool playing = !strcmp(m.status, "playing");
 
@@ -912,12 +931,12 @@ static void renderMediaPage() {
     lv_obj_set_style_bg_color(s_mKnob, lv_color_hex(0xFFFFFF), 0);
     lv_obj_set_style_bg_opa(s_mKnob, m.lenMs ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
     lv_obj_set_style_radius(s_mKnob, LV_RADIUS_CIRCLE, 0);
-    s_mElapsed = makeLabel(s_body, &lv_font_montserrat_12, Theme::HUDText, "");
+    s_mElapsed = makeLabel(s_body, &font_time_12, Theme::HUDText, "");   // tabular digits: no shifting
     lv_obj_set_pos(s_mElapsed, M_BAR_X, M_BAR_Y + 12);
-    s_mRemain = makeLabel(s_body, &lv_font_montserrat_12, Theme::HUDDim, "");
-    lv_obj_set_width(s_mRemain, 200);
+    s_mRemain = makeLabel(s_body, &font_time_12, Theme::HUDDim, "");   // tabular digits: no shifting
+    lv_obj_set_width(s_mRemain, 240);
     lv_obj_set_style_text_align(s_mRemain, LV_TEXT_ALIGN_RIGHT, 0);
-    lv_obj_set_pos(s_mRemain, M_BAR_X + M_BAR_W - 200, M_BAR_Y + 12);
+    lv_obj_set_pos(s_mRemain, M_BAR_X + M_BAR_W - 240, M_BAR_Y + 12);
 
     char rate[12];
     snprintf(rate, sizeof(rate), "%.2fx", m.rate);
@@ -997,7 +1016,8 @@ namespace Ticker {
 
 #if defined(BOARD_HAS_MEDIA_PAGE)
 void onMediaState(const char* player, const char* status, const char* title, const char* artist,
-                  uint32_t posMs, uint32_t lenMs, float rate, bool canRate, uint8_t players) {
+                  uint32_t posMs, uint32_t lenMs, float rate, bool canRate, uint8_t players,
+                  int32_t localDayMs) {
     lockState();
     snprintf(s_media.player, sizeof(s_media.player), "%s", player ? player : "");
     snprintf(s_media.status, sizeof(s_media.status), "%s", status ? status : "none");
@@ -1011,6 +1031,7 @@ void onMediaState(const char* player, const char* status, const char* title, con
     s_media.rate = rate > 0.01f ? rate : 1.0f;
     s_media.canRate = canRate;
     s_media.players = players;
+    s_media.localDayMs = localDayMs;
     s_mediaGen++;
     unlockState();
 }

@@ -199,8 +199,8 @@ bool renderScene(const char* scene, const char* path, int frames, const char* pa
   else if (std::strncmp(page, "media", 5) == 0) {
     Ticker::onTouch({Input::TouchGesture::TAP, 480, 10});
     if (std::strcmp(page, "media") == 0)
-      Ticker::onMediaState("firefox", "playing", "How a CPU Works - Instruction Pipeline Explained",
-                           "Some Channel", 754000, 1931000, 1.25f, true, 2);
+      Ticker::onMediaState("firefox", "playing", "Wie ein Prozessor rechnet \xE2\x80\x93 \xC3\x84rger mit Caches",
+                           "Some Channel", 754000, 1931000, 1.25f, true, 2, 20 * 3600000 + 15 * 60000);
   }
 #endif
 #else

@@ -3,6 +3,10 @@
 #include "../boards/board_config.h"
 #include "../util/memory.h"
 #include "fonts/font_noto_kr_12.h"
+// Montserrat's Latin glyphs beyond ASCII (gen_latin_font.py): ä, é, ß, – ...
+extern const lv_font_t font_latin_12;
+extern const lv_font_t font_latin_16;
+extern const lv_font_t font_tabular_12;
 #if defined(BOARD_IPS10) || defined(BOARD_FOCUS_STRIP) || defined(BOARD_T_EMBED)
 #include "fonts/font_noto_kr_16.h"
 #endif
@@ -857,6 +861,10 @@ lv_font_t font_kr_20;
 #elif defined(BOARD_FOCUS_STRIP) || defined(BOARD_T_EMBED)
 lv_font_t font_kr_16;
 #endif
+// RAM copies of the Latin faces, so they can point on to the Korean ones.
+static lv_font_t s_latin_12;
+static lv_font_t s_latin_16;
+lv_font_t font_time_12;
 
 static size_t rgb565StrideBytes(uint32_t width) {
     return ((width * sizeof(uint16_t)) + 31u) & ~31u;
@@ -1551,18 +1559,27 @@ void displayInit() {
     // Korean font fallback: create a RAM copy of montserrat_12 with fallback pointer set.
     // Can't modify the built-in font directly (it's in flash .rodata).
     // Instead, each UI file that needs Korean should use &font_kr_12 from display.h.
+    // Chain: Montserrat (ASCII) -> Montserrat Latin (accents) -> Noto KR.
+    s_latin_12 = font_latin_12;
+    s_latin_12.fallback = &font_noto_kr_12;
     font_kr_12 = lv_font_montserrat_12;  // Copy struct to RAM
-    font_kr_12.fallback = &font_noto_kr_12;  // Set Korean fallback
+    font_kr_12.fallback = &s_latin_12;
+    font_time_12 = font_tabular_12;
+    font_time_12.fallback = &s_latin_12;
+#if defined(BOARD_IPS10) || defined(BOARD_FOCUS_STRIP) || defined(BOARD_T_EMBED)
+    s_latin_16 = font_latin_16;
+    s_latin_16.fallback = &font_noto_kr_16;
+#endif
 #if defined(BOARD_IPS10)
     // 16/20px faces fall back to the 16px Noto KR face (IPS10 carries it —
     // ~1.5MB flash) so Korean card/summary text is legible on the 10" panel
     // instead of dropping to the 12px face beside 16–20px Latin.
-    font_kr_16 = lv_font_montserrat_16; font_kr_16.fallback = &font_noto_kr_16;
-    font_kr_20 = lv_font_montserrat_20; font_kr_20.fallback = &font_noto_kr_16;
+    font_kr_16 = lv_font_montserrat_16; font_kr_16.fallback = &s_latin_16;
+    font_kr_20 = lv_font_montserrat_20; font_kr_20.fallback = &s_latin_16;
 #elif defined(BOARD_FOCUS_STRIP) || defined(BOARD_T_EMBED)
     // Companion surfaces are read from farther away than the older small HUDs;
     // keep Korean primary text at the same 16px tier as Latin.
-    font_kr_16 = lv_font_montserrat_16; font_kr_16.fallback = &font_noto_kr_16;
+    font_kr_16 = lv_font_montserrat_16; font_kr_16.fallback = &s_latin_16;
 #endif
 
 #if defined(BOARD_IPS10)

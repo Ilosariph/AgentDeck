@@ -41,6 +41,13 @@ export interface MediaStateMessage {
   rate: number;
   /** The player accepts a different speed (MinimumRate < MaximumRate). */
   canRate: boolean;
+  /** Host local time of day at sending (ms since local midnight), for "ends at". */
+  localDayMs?: number;
+}
+
+/** Milliseconds since local midnight: the board's clock may not be set (USB only, no NTP). */
+export function localDayMs(now = new Date()): number {
+  return ((now.getHours() * 60 + now.getMinutes()) * 60 + now.getSeconds()) * 1000 + now.getMilliseconds();
 }
 
 export type MediaAction = 'toggle' | 'next' | 'previous' | 'seek' | 'seek_by' | 'cycle' | 'rate';
@@ -278,7 +285,7 @@ export class MediaWatcher {
     if (!force && !worthSending(this.last, this.lastAt, msg, now)) return;
     this.last = msg;
     this.lastAt = now;
-    this.send(msg);
+    this.send({ ...msg, localDayMs: localDayMs(new Date(now)) });
   }
 
   /** A board's media_control. Re-polls right after so the board sees the result. */

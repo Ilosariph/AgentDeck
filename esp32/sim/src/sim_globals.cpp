@@ -18,6 +18,11 @@
 // Noto face here is an undefined symbol at link.
 #if !defined(BOARD_TRMNL_75) && !defined(BOARD_LED8X32)
 extern "C" const lv_font_t font_noto_kr_12;
+extern const lv_font_t font_latin_12;
+extern const lv_font_t font_latin_16;
+extern const lv_font_t font_tabular_12;
+static lv_font_t s_latin_12, s_latin_16;
+lv_font_t font_time_12;
 lv_font_t font_kr_12 = lv_font_montserrat_12;
 // Which larger Korean-safe faces exist is a per-board contract declared in
 // ui/display.h — mirror that condition exactly, or the board's UI references a
@@ -33,12 +38,19 @@ lv_font_t font_kr_20 = lv_font_montserrat_20;
 #endif
 static struct KrFontInit {
     KrFontInit() {
-        font_kr_12.fallback = &font_noto_kr_12;
+        // Montserrat (ASCII) -> Montserrat Latin -> Noto KR, as on the device.
+        s_latin_12 = font_latin_12;
+        s_latin_12.fallback = &font_noto_kr_12;
+        font_kr_12.fallback = &s_latin_12;
+        font_time_12 = font_tabular_12;
+        font_time_12.fallback = &s_latin_12;
 #if defined(BOARD_IPS10) || defined(BOARD_T_EMBED) || defined(BOARD_FOCUS_STRIP)
-        font_kr_16.fallback = &font_noto_kr_16;
+        s_latin_16 = font_latin_16;
+        s_latin_16.fallback = &font_noto_kr_16;
+        font_kr_16.fallback = &s_latin_16;
 #endif
 #if defined(BOARD_IPS10)
-        font_kr_20.fallback = &font_noto_kr_16;
+        font_kr_20.fallback = &s_latin_16;
 #endif
     }
 } s_krFontInit;

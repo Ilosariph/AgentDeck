@@ -1788,7 +1788,8 @@ void parseMessage(const char* json, size_t length) {
     } else if (strcmp(type, "media_state") == 0) {
         Ticker::onMediaState(obj["player"] | "", obj["status"] | "none", obj["title"] | "",
                              obj["artist"] | "", obj["positionMs"] | 0u, obj["lengthMs"] | 0u,
-                             obj["rate"] | 1.0f, obj["canRate"] | false, obj["players"] | 0);
+                             obj["rate"] | 1.0f, obj["canRate"] | false, obj["players"] | 0,
+                             obj["localDayMs"] | -1);
 #endif
 #if defined(BOARD_T_DISPLAY_PRO)
     } else if (strcmp(type, "photo_result") == 0) {

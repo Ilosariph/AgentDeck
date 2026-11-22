@@ -56,7 +56,17 @@ inline size_t utf8CharCount(const char* s) {
 // and blank everything else outside ASCII / Hangul / LVGL's F000 symbol area.
 // Shared by every LVGL board (ips10 cards, T-Embed knob) — never re-implement
 // per surface. u8g2 e-ink surfaces don't need it (unifont covers U+00B7).
-inline void sanitizeLvglText(char* s) {
+//
+// `latin`: the label's font is font_kr_12 / font_kr_16, whose chain includes
+// Montserrat Latin (fonts/font_latin_*.c): Latin-1 + Extended-A and the
+// typographic punctuation stay as they are instead of being mapped or blanked.
+inline bool latinFallbackHas(uint32_t cp) {
+    return (cp >= 0xA0 && cp <= 0x17F) || cp == 0x2013 || cp == 0x2014
+        || (cp >= 0x2018 && cp <= 0x201E) || cp == 0x2022 || cp == 0x2026
+        || cp == 0x20AC || cp == 0x2122;
+}
+
+inline void sanitizeLvglText(char* s, bool latin = false) {
     if (!s) return;
     char* d = s;
     while (*s) {
@@ -83,7 +93,9 @@ inline void sanitizeLvglText(char* s) {
             continue;
         }
 
-        if (cp == 0x2022 || cp == 0x00B7) {          // • · → -
+        if (latin && latinFallbackHas(cp)) {
+            for (size_t i = 0; i < len; i++) *d++ = s[i];
+        } else if (cp == 0x2022 || cp == 0x00B7) {   // • · → -
             *d++ = '-';
         } else if (cp == 0x2013 || cp == 0x2014) {   // – — → -
             *d++ = '-';

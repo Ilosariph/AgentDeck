@@ -45,7 +45,8 @@ void onVoiceResult(const char* text, bool pending, const char* note);
 #if defined(BOARD_HAS_MEDIA_PAGE)
 /** media_state from the daemon (network task): the host's MPRIS player. */
 void onMediaState(const char* player, const char* status, const char* title, const char* artist,
-                  uint32_t posMs, uint32_t lenMs, float rate, bool canRate, uint8_t players);
+                  uint32_t posMs, uint32_t lenMs, float rate, bool canRate, uint8_t players,
+                  int32_t localDayMs);
 #endif
 #if defined(BOARD_HAS_HOST_LOCK)
 /** host_lock from the daemon (network task): the PC's screen is locked. */
