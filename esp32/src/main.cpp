@@ -427,13 +427,11 @@ static void networkTask(void* param) {
 static void stripDeepSleep(const char* why) {
     Serial.printf("[Power] deep sleep (%s), PWR wakes\n", why);
     Serial.flush();
-    UI::setBrightness(0);          // EXIO1 low: the expander keeps it through sleep
-    UI::panelSleep();
-    ledcDetach(BOARD_PIN_BL);      // PWM off, pin high (dark, active low) and held
-    pinMode(BOARD_PIN_BL, OUTPUT);
-    digitalWrite(BOARD_PIN_BL, HIGH);
-    gpio_hold_en((gpio_num_t)BOARD_PIN_BL);
-    gpio_deep_sleep_hold_en();
+    // EXIO1 low switches the backlight driver off, and the expander keeps it
+    // through sleep. No pad holds: they outlive the wake on the RTC pads. No
+    // panel sleep-in either: after 0x28/0x10 the AXS15231B (display and touch)
+    // stayed unresponsive through resets until power was cut.
+    UI::setBrightness(0);
     // ext0 is level-triggered: a held button would wake the board at once.
     while (digitalRead(BOARD_PIN_BTN_PWR) == LOW) delay(10);
     delay(50);

@@ -50,6 +50,11 @@ inline void earlyPower() {
     static bool done = false;
     if (done) return;
     done = true;
+    // Older firmware held every pad through deep sleep, and the RTC-capable
+    // ones (QSPI 9-14, touch 17/18, LCD reset 21) stayed frozen after waking:
+    // grey screen, no touch, until power was cut. Release whatever is held.
+    gpio_deep_sleep_hold_dis();
+    gpio_force_unhold_all();
     Wire.begin(BOARD_PIN_I2C_SDA, BOARD_PIN_I2C_SCL, 400000);
     haveTca() = i2cPresent(Wire, ADDR_TCA9554);
     if (!haveTca()) return;
@@ -60,8 +65,6 @@ inline void earlyPower() {
 // ── Backlight: PWM active low (V2 GPIO42, V1 GPIO8), V2 enable on EXIO1 ────
 
 inline void backlightBegin() {
-    // Deep sleep held the pin high (dark); give it back to the PWM.
-    gpio_hold_dis((gpio_num_t)BOARD_PIN_BL);
     ledcAttach(BOARD_PIN_BL, 50000, 8);
 }
 
@@ -107,19 +110,6 @@ public:
         bus_->endWrite();
         delay(100);
         return true;
-    }
-
-    /** Display off + sleep in (before deep sleep; a reset wakes it). */
-    void sleep() {
-        if (!bus_) return;
-        bus_->beginWrite();
-        bus_->writeCommand(0x28);
-        bus_->endWrite();
-        delay(20);
-        bus_->beginWrite();
-        bus_->writeCommand(0x10);
-        bus_->endWrite();
-        delay(120);
     }
 
     /** Push a whole landscape frame (kW x kH, native RGB565), turned 90 degrees

@@ -78,10 +78,6 @@ lv_display_t* getDisplay();
  * Set display backlight brightness (0-255).
  */
 void setBrightness(int level);
-#if defined(BOARD_WAVESHARE_349)
-/** Panel display-off + sleep-in, just before deep sleep. */
-void panelSleep();
-#endif
 
 /**
  * LVGL tick handler — call from timer ISR or task.
